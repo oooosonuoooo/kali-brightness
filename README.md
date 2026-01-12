@@ -1,4 +1,4 @@
-# Kali Brightness Controller
+# Brightness Controller
 A flicker-free Brightness & Warmth controller for Kali Linux (XFCE).
 
 ![Status](https://img.shields.io/badge/Status-Stable-brightgreen)

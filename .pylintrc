@@ -1,0 +1,25 @@
+[MASTER]
+extension-pkg-allow-list=PyQt5
+
+[MESSAGES CONTROL]
+disable=
+    missing-module-docstring,
+    missing-class-docstring,
+    missing-function-docstring,
+    line-too-long,
+    too-many-lines,
+    too-many-arguments,
+    too-many-positional-arguments,
+    too-few-public-methods,
+    too-many-instance-attributes,
+    too-many-locals,
+    too-many-branches,
+    too-many-statements,
+    invalid-name,
+    unnecessary-lambda,
+    broad-exception-caught,
+    protected-access,
+    attribute-defined-outside-init,
+    wrong-import-position,
+    unused-argument,
+    no-name-in-module

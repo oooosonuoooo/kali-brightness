@@ -129,18 +129,18 @@ install_dependencies() {
             info "Installing dependencies with apt-get..."
             run apt-get update -qq
             run env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-                python3 python3-pyqt5 redshift x11-xserver-utils
+                python3 python3-pyqt5 x11-xserver-utils
             ;;
         dnf)
             info "Installing dependencies with dnf..."
-            run dnf install -y python3 python3-qt5 redshift xrandr
+            run dnf install -y python3 python3-qt5 xrandr
             ;;
         pacman)
             info "Installing dependencies with pacman..."
-            run pacman -Sy --noconfirm python python-pyqt5 redshift xorg-xrandr
+            run pacman -Sy --noconfirm python python-pyqt5 xorg-xrandr
             ;;
         *)
-            warn "No supported package manager found. Install python3, PyQt5, redshift, and xrandr manually."
+            warn "No supported package manager found. Install python3, PyQt5, and xrandr manually."
             ;;
     esac
 }
@@ -170,7 +170,7 @@ Icon=preferences-desktop-display
 Terminal=false
 Type=Application
 Categories=Utility;Settings;HardwareSettings;
-Keywords=brightness;gamma;night;display;monitor;redshift;xrandr;
+Keywords=brightness;gamma;night;display;monitor;xrandr;
 StartupNotify=false
 EOF
     chmod 644 "$DESKTOP_PATH"
@@ -221,7 +221,7 @@ verify_installation() {
     [ -f "$DESKTOP_PATH" ] && ok "Desktop entry: $DESKTOP_PATH" || { error "Desktop entry missing"; fail=1; }
     command -v python3 >/dev/null 2>&1 && ok "python3: $(python3 --version)" || { error "python3 not found"; fail=1; }
     python3 -c "from PyQt5.QtWidgets import QApplication" 2>/dev/null && ok "PyQt5 import: OK" || { error "PyQt5 import failed"; fail=1; }
-    command -v redshift >/dev/null 2>&1 && ok "redshift: $(redshift -V 2>&1 | head -1)" || warn "redshift not found; color temperature control will be unavailable."
+    command -v redshift >/dev/null 2>&1 && ok "redshift: $(redshift -V 2>&1 | head -1) (optional external neutralize only)" || ok "redshift: not installed (OK)"
     command -v xrandr >/dev/null 2>&1 && ok "xrandr: $(xrandr --version 2>&1 | head -1)" || warn "xrandr not found; display detection/fallback control will be unavailable."
 
     [ "$fail" -eq 0 ] || die "Installation verification failed."
@@ -285,4 +285,4 @@ launch_app
 printf "\n%bInstallation complete.%b\n" "$GREEN$BOLD" "$NC"
 printf "Run: %s\n" "$APP_NAME"
 printf "Autostart: %s\n" "$AUTOSTART_MODE"
-printf "Session note: X11 gives full support; Wayland support is limited by redshift/xrandr.\n"
+printf "Session note: X11 gives full support; Wayland cannot use xrandr software brightness.\n"

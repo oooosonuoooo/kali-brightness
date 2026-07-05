@@ -75,13 +75,15 @@ for output in $(xrandr --query | awk '/ connected/{print $1}'); do
 done
 ```
 
-If redshift is also installed, reset it too:
+If an external redshift process is running outside Kali Glass, neutralize it too:
 
 ```bash
 redshift -x
 ```
 
-The app automatically does both when you quit via the tray menu (☓ Quit).
+The app neutralizes redshift once before manual xrandr control. It keeps the
+current display settings when you quit; use the Reset button to return to
+neutral brightness/gamma.
 
 ---
 

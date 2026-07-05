@@ -8,7 +8,7 @@ Kali Glass Controller is a PyQt5 tray app for X11 display tuning on Kali Linux a
 
 | Feature | Notes |
 | --- | --- |
-| Brightness | Software brightness 1–100 % mapped directly to `xrandr --brightness` (1 % → 0.01, 100 % → 1.0). |
+| Brightness | Software brightness 5–100 % mapped directly to `xrandr --brightness` (5 % → 0.05, 50 % → 0.5, 100 % → 1.0). |
 | Contrast | Contrast slider 50 = neutral (no change), > 50 = higher contrast, < 50 = lower contrast. |
 | Gamma | Gamma slider 100 = neutral (1.0), 50 = 0.5, 200 = 2.0. Applied per channel via `xrandr --gamma`. |
 | RGB channels | Separate red, green, and blue gamma multipliers, clamped to safe xrandr values. |
@@ -28,7 +28,7 @@ Kali Glass Controller is a PyQt5 tray app for X11 display tuning on Kali Linux a
 | `python3` | Runtime. |
 | `python3-pyqt5` | GUI framework. |
 | `x11-xserver-utils` | Provides `xrandr` for all display control. |
-| `redshift` | Optional; only used for colour-temperature reset on quit. |
+| `brightnessctl` | Optional fallback when a real `/sys/class/backlight` device exists. Normal X11 control does not require it. |
 
 ### Why X11 is required
 
@@ -192,13 +192,13 @@ The Python command runner executes argument lists without `shell=True`, reports 
 ### v2.1 (current)
 - **xrandr-only backend** — removed redshift/xrandr conflicts that caused flickering.
 - **Anti-flicker**: 300 ms debounce + "latest wins" — never kills a running process mid-command.
-- **Brightness fix**: 100 % = xrandr 1.0, 50 % = 0.5, 1 % = 0.01.
+- **Brightness fix**: 100 % = xrandr 1.0, 50 % = 0.5, 5 % = 0.05.
 - **Contrast fix**: neutral value 50 produces no change; moving above/below 50 visibly shifts contrast.
 - **Colour temperature** via pure xrandr gamma offsets (no redshift dependency for temp control).
 - **Wayland**: clear warning banner + silent skip of display commands.
 - **Diagnostics**: startup log + "Test Backend" tray menu action.
 - **Display targeting**: proper "All Displays" vs single-output logic.
-- **Quit**: resets all outputs to xrandr 1.0/neutral before exiting.
+- **Quit**: keeps the current display settings; use **Reset** to restore xrandr 1.0/neutral.
 
 ### v2.0
 - Initial public release.

@@ -81,9 +81,9 @@ If an external redshift process is running outside Kali Glass, neutralize it too
 redshift -x
 ```
 
-The app neutralizes redshift once before manual xrandr control. It keeps the
-current display settings when you quit; use the Reset button to return to
-neutral brightness/gamma.
+The app stops and disables user redshift/gammastep systemd services before
+manual xrandr control. It keeps the current display settings when you quit; use
+the Reset button to return to neutral brightness/gamma.
 
 ---
 

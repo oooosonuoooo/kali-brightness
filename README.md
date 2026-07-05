@@ -17,6 +17,7 @@ Kali Glass Controller is a PyQt5 tray app for X11 display tuning on Kali Linux a
 | Auto schedule | Applies day/night presets at user-configured times. |
 | Multi-monitor | Detects X11 outputs through `xrandr --query`; targets all displays or a single output. |
 | Anti-flicker | 300 ms debounce + "latest wins" logic: never kills a running command; applies only the newest pending settings after the current command completes. |
+| External color tools | Stops/disables user `redshift`/`gammastep` services when Kali Glass takes over, so they cannot reset gamma after the app closes. |
 | Diagnostics | Startup log and "Test Backend" tray action shows session type, DISPLAY, xrandr path, detected outputs, last command, and errors. |
 | Tray app | Floating panel with tray menu and single-instance lock. |
 | Safe fallback | Missing tools are reported in the UI and log instead of crashing. |
@@ -198,6 +199,7 @@ The Python command runner executes argument lists without `shell=True`, reports 
 - **Wayland**: clear warning banner + silent skip of display commands.
 - **Diagnostics**: startup log + "Test Backend" tray menu action.
 - **Display targeting**: proper "All Displays" vs single-output logic.
+- **System redshift fix**: stops/disables user redshift/gammastep services before applying xrandr, so settings persist after closing Kali Glass.
 - **Quit**: keeps the current display settings; use **Reset** to restore xrandr 1.0/neutral.
 
 ### v2.0

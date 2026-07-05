@@ -96,6 +96,31 @@ eDP-1 connected primary 1920x1080+1680+0 (normal left inverted right x axis y ax
             with mock.patch.object(kg.shutil, "which", return_value=None):
                 self.assertFalse(kg.brightnessctl_available(None, tmp))
 
+    def test_stop_disable_user_service_stops_enabled_redshift_service(self):
+        calls = []
+
+        def fake_run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            if cmd[2] == "show":
+                return True, "ActiveState=active\nSubState=running\nUnitFileState=enabled\n", ""
+            return True, "", ""
+
+        with mock.patch.object(kg, "run_cmd", side_effect=fake_run):
+            result = kg.stop_disable_user_service(
+                "redshift.service", "/usr/bin/systemctl"
+            )
+
+        self.assertTrue(result["stop_ok"])
+        self.assertTrue(result["disable_ok"])
+        self.assertIn(
+            ["/usr/bin/systemctl", "--user", "stop", "redshift.service"],
+            calls,
+        )
+        self.assertIn(
+            ["/usr/bin/systemctl", "--user", "disable", "redshift.service"],
+            calls,
+        )
+
 
 class BackendDispatchTests(unittest.TestCase):
     def test_latest_settings_queue_prevents_overlapping_dispatch(self):
@@ -150,24 +175,43 @@ class BackendDispatchTests(unittest.TestCase):
         self.assertEqual(engine._last_cmd_str, engine._last_successful_cmd_str)
         self.assertEqual(len(engine.ui.status.ok_messages), 1)
 
-    def test_redshift_is_neutralized_once_only(self):
+    def test_external_color_services_are_suppressed_once_only(self):
         engine = kg.DisplayEngine.__new__(kg.DisplayEngine)
-        engine._redshift_neutralized = False
+        engine._external_color_suppressed = False
         engine.redshift_path = "/usr/bin/redshift"
-        calls = []
+        engine.systemctl_path = "/usr/bin/systemctl"
+        service_calls = []
+        redshift_calls = []
+        terminated = []
 
         def fake_run(cmd, *args, **kwargs):
-            calls.append((cmd, kwargs))
+            redshift_calls.append((cmd, kwargs))
             return True, "", ""
 
-        with mock.patch.object(
-            kg.DisplayEngine, "_redshift_process_running", return_value=True
-        ), mock.patch.object(kg, "run_cmd", side_effect=fake_run):
-            kg.DisplayEngine._neutralize_redshift_once(engine)
-            kg.DisplayEngine._neutralize_redshift_once(engine)
+        def fake_stop_disable(service, systemctl_path):
+            service_calls.append((service, systemctl_path))
+            return {
+                "service": service,
+                "available": True,
+                "before": {"ActiveState": "active", "UnitFileState": "enabled"},
+                "stop_ok": True,
+                "disable_ok": True,
+                "after": {"ActiveState": "inactive", "UnitFileState": "disabled"},
+            }
 
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][0], ["/usr/bin/redshift", "-x"])
+        def fake_terminate(process_name):
+            terminated.append(process_name)
+            return [1234] if process_name == "redshift" else []
+
+        with mock.patch.object(kg, "run_cmd", side_effect=fake_run), \
+             mock.patch.object(kg, "stop_disable_user_service", side_effect=fake_stop_disable), \
+             mock.patch.object(kg, "terminate_processes_by_name", side_effect=fake_terminate):
+            kg.DisplayEngine._suppress_external_color_once(engine)
+            kg.DisplayEngine._suppress_external_color_once(engine)
+
+        self.assertEqual(len(service_calls), len(kg.EXTERNAL_COLOR_SERVICES))
+        self.assertEqual(redshift_calls, [(["/usr/bin/redshift", "-x"], {"silent": False})])
+        self.assertEqual(terminated, list(kg.EXTERNAL_COLOR_PROCESSES))
 
     def test_quit_keeps_current_display_settings(self):
         class FakeApp:

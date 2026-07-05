@@ -28,6 +28,7 @@ import math
 import datetime
 import logging
 import shlex
+import signal
 
 from PyQt5.QtWidgets import (
     QApplication, QSystemTrayIcon, QMenu, QWidget,
@@ -78,6 +79,21 @@ DAY_TEMP       = 6500
 # xrandr gamma clamping — safe range
 GAMMA_XRANDR_MIN = 0.3
 GAMMA_XRANDR_MAX = 3.0
+
+# External color-temperature tools fight xrandr gamma.  If one is running, stop
+# it once when Kali Glass takes display control and do not restart it on quit.
+EXTERNAL_COLOR_SERVICES = (
+    "redshift.service",
+    "redshift-gtk.service",
+    "gammastep.service",
+    "gammastep-indicator.service",
+)
+EXTERNAL_COLOR_PROCESSES = (
+    "redshift",
+    "redshift-gtk",
+    "gammastep",
+    "gammastep-indicator",
+)
 
 # ============================================================
 # LOGGING SETUP
@@ -164,6 +180,107 @@ def backlight_devices(backlight_dir="/sys/class/backlight"):
 def brightnessctl_available(brightnessctl_path=None, backlight_dir="/sys/class/backlight"):
     brightnessctl_path = brightnessctl_path or shutil.which("brightnessctl")
     return bool(brightnessctl_path and backlight_devices(backlight_dir))
+
+
+def systemctl_user_show(service, systemctl_path=None):
+    systemctl_path = systemctl_path or shutil.which("systemctl")
+    if not systemctl_path:
+        return {}
+    ok, out, _ = run_cmd(
+        [
+            systemctl_path, "--user", "show", service,
+            "-p", "ActiveState", "-p", "SubState", "-p", "UnitFileState",
+            "--no-pager",
+        ],
+        silent=True,
+    )
+    if not ok:
+        return {}
+    state = {}
+    for line in out.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            state[key] = value
+    return state
+
+
+def stop_disable_user_service(service, systemctl_path=None):
+    """Stop and disable a user systemd unit. Returns a dict for diagnostics."""
+    systemctl_path = systemctl_path or shutil.which("systemctl")
+    result = {
+        "service": service,
+        "available": bool(systemctl_path),
+        "before": {},
+        "stop_ok": None,
+        "disable_ok": None,
+        "after": {},
+    }
+    if not systemctl_path:
+        return result
+
+    before = systemctl_user_show(service, systemctl_path)
+    result["before"] = before
+    known = bool(before)
+    active = before.get("ActiveState") == "active"
+    enabled = before.get("UnitFileState") in {"enabled", "enabled-runtime", "linked", "linked-runtime"}
+    if not known:
+        return result
+
+    if active:
+        stop_ok, _, stop_err = run_cmd(
+            [systemctl_path, "--user", "stop", service], silent=False
+        )
+        result["stop_ok"] = stop_ok
+        if not stop_ok:
+            log.warning("Failed to stop %s: %s", service, stop_err.strip())
+    else:
+        result["stop_ok"] = True
+
+    if enabled:
+        disable_ok, _, disable_err = run_cmd(
+            [systemctl_path, "--user", "disable", service], silent=False
+        )
+        result["disable_ok"] = disable_ok
+        if not disable_ok:
+            log.warning("Failed to disable %s: %s", service, disable_err.strip())
+    else:
+        result["disable_ok"] = True
+
+    result["after"] = systemctl_user_show(service, systemctl_path)
+    return result
+
+
+def pids_for_process_name(process_name, pgrep_path=None):
+    pgrep_path = pgrep_path or shutil.which("pgrep")
+    if not pgrep_path:
+        return []
+    ok, out, _ = run_cmd([pgrep_path, "-x", process_name], silent=True)
+    if not ok:
+        return []
+    pids = []
+    for token in out.split():
+        try:
+            pids.append(int(token))
+        except ValueError:
+            log.debug("Ignoring non-numeric pid from pgrep: %s", token)
+    return pids
+
+
+def terminate_processes_by_name(process_name, own_pid=None, kill_func=None, pgrep_path=None):
+    own_pid = os.getpid() if own_pid is None else own_pid
+    kill_func = os.kill if kill_func is None else kill_func
+    terminated = []
+    for pid in pids_for_process_name(process_name, pgrep_path):
+        if pid == own_pid:
+            continue
+        try:
+            kill_func(pid, signal.SIGTERM)
+            terminated.append(pid)
+        except ProcessLookupError:
+            continue
+        except PermissionError as exc:
+            log.warning("No permission to terminate %s pid=%s: %s", process_name, pid, exc)
+    return terminated
 
 
 def _normalize_cmd(cmd):
@@ -840,6 +957,7 @@ class DisplayEngine(QWidget):
         self.xrandr_path  = shutil.which("xrandr")
         self.redshift_path = shutil.which("redshift")
         self.brightnessctl_path = shutil.which("brightnessctl")
+        self.systemctl_path = shutil.which("systemctl")
         self.backlight_names = backlight_devices()
 
         # QProcess for asynchronous, non-blocking xrandr calls
@@ -856,7 +974,7 @@ class DisplayEngine(QWidget):
         self._last_schedule_state = None
         self._last_applied_info   = None
         self._apply_had_error     = False
-        self._redshift_neutralized = False
+        self._external_color_suppressed = False
 
         app = QApplication.instance()
         if app:
@@ -897,6 +1015,7 @@ class DisplayEngine(QWidget):
         xrandr_path  = self.xrandr_path or "(not found)"
         redshift_path = self.redshift_path or "(not found)"
         brightnessctl_path = self.brightnessctl_path or "(not found)"
+        systemctl_path = self.systemctl_path or "(not found)"
         backlights = self.backlight_names or []
 
         log.info("=== STARTUP DIAGNOSTICS ===")
@@ -906,7 +1025,12 @@ class DisplayEngine(QWidget):
         log.info("  xrandr path     : %s", xrandr_path)
         log.info("  redshift path   : %s", redshift_path)
         log.info("  brightnessctl   : %s", brightnessctl_path)
+        log.info("  systemctl       : %s", systemctl_path)
         log.info("  backlight devs  : %s", ", ".join(backlights) if backlights else "(none)")
+        for service in EXTERNAL_COLOR_SERVICES:
+            state = systemctl_user_show(service, self.systemctl_path)
+            if state:
+                log.info("  external service %s: %s", service, state)
 
         if is_wayland():
             log.warning("  *** Wayland session detected — xrandr will NOT work ***")
@@ -938,6 +1062,7 @@ class DisplayEngine(QWidget):
             f"xrandr       : {self.xrandr_path or 'not found'}",
             f"redshift     : {self.redshift_path or 'not found'}",
             f"brightnessctl: {self.brightnessctl_path or 'not found'}",
+            f"systemctl    : {self.systemctl_path or 'not found'}",
             f"Backlights   : {', '.join(self.backlight_names) if self.backlight_names else 'none'}",
             f"Outputs      : {', '.join(outputs) if outputs else 'none detected'}",
             "Backend      : xrandr (primary)",
@@ -1049,7 +1174,7 @@ class DisplayEngine(QWidget):
             self.ui.status.set_warn(reason)
             log.warning("%s", reason)
             return
-        self._neutralize_redshift_once()
+        self._suppress_external_color_once()
         self._queue_or_dispatch(self._settings_snapshot(reset=True))
 
     def apply_settings(self):
@@ -1065,7 +1190,7 @@ class DisplayEngine(QWidget):
             log.warning("%s", reason)
             return
 
-        self._neutralize_redshift_once()
+        self._suppress_external_color_once()
         self._queue_or_dispatch(self._settings_snapshot())
 
     def _queue_or_dispatch(self, snap):
@@ -1078,32 +1203,36 @@ class DisplayEngine(QWidget):
         self._dispatch(snap)
         return True
 
-    def _redshift_process_running(self):
-        pgrep_path = shutil.which("pgrep")
-        if not pgrep_path:
-            return False
-        ok, out, _ = run_cmd([pgrep_path, "-x", "redshift"], silent=True)
-        return bool(ok and out.strip())
-
-    def _neutralize_redshift_once(self):
-        if self._redshift_neutralized:
+    def _suppress_external_color_once(self):
+        if self._external_color_suppressed:
             return
-        self._redshift_neutralized = True
+        self._external_color_suppressed = True
+
+        for service in EXTERNAL_COLOR_SERVICES:
+            result = stop_disable_user_service(service, self.systemctl_path)
+            if result["available"] and result["before"]:
+                log.info("Suppressed external color service: %s", result)
 
         if not self.redshift_path:
-            log.info("redshift not found; no external color process to neutralize")
-            return
-
-        was_running = self._redshift_process_running()
-        ok, out, err = run_cmd([self.redshift_path, "-x"], silent=False)
-        log.info(
-            "redshift neutralize once running=%s ok=%s stdout=%r stderr=%r",
-            was_running, ok, out.strip(), err.strip()
-        )
-        if was_running:
-            log.warning(
-                "External redshift process was active; neutralized before xrandr control"
+            log.info("redshift not found; no redshift gamma state to neutralize")
+        else:
+            ok, out, err = run_cmd([self.redshift_path, "-x"], silent=False)
+            log.info(
+                "redshift neutralize once ok=%s stdout=%r stderr=%r",
+                ok, out.strip(), err.strip()
             )
+
+        for process_name in EXTERNAL_COLOR_PROCESSES:
+            terminated = terminate_processes_by_name(process_name)
+            if terminated:
+                log.warning(
+                    "Terminated external color process %s pids=%s before xrandr control",
+                    process_name, terminated
+                )
+
+    def _neutralize_redshift_once(self):
+        """Backward-compatible wrapper used by older tests or integrations."""
+        self._suppress_external_color_once()
 
     # ----------------------------------------------------------
     # Settings → xrandr gamma computation

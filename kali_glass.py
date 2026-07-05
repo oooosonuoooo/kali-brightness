@@ -1,8 +1,20 @@
 #!/usr/bin/env python3
 # ============================================================
-# KALI GLASS CONTROLLER v2.0
+# KALI GLASS CONTROLLER v2.1
 # A display control center for Kali Linux (X11)
 # License: MIT
+#
+# FIXES in v2.1:
+#   - xrandr-only backend path (no more redshift/xrandr conflicts)
+#   - 300ms debounce to prevent slider-spam
+#   - "latest wins" logic — never kills a running process; queues
+#     only the newest pending settings and applies them after finish
+#   - Brightness 100% = xrandr 1.0, 50% = 0.5, 1% = 0.01
+#   - Contrast neutral at slider value 50 produces no change (gamma 1.0)
+#   - RGB sliders affect red/green/blue gamma independently
+#   - Wayland shows clear warning; silently skips display commands
+#   - Startup diagnostic log: session type, DISPLAY, xrandr path, outputs
+#   - "Test Backend" tray action for on-demand diagnostics
 # ============================================================
 
 import sys
@@ -20,7 +32,7 @@ from PyQt5.QtWidgets import (
     QApplication, QSystemTrayIcon, QMenu, QWidget,
     QVBoxLayout, QHBoxLayout, QLabel, QSlider,
     QPushButton, QFrame, QAction, QCheckBox, QTimeEdit,
-    QComboBox, QGraphicsDropShadowEffect
+    QComboBox, QGraphicsDropShadowEffect, QMessageBox
 )
 from PyQt5.QtCore import Qt, QTimer, QTime, pyqtSignal, QProcess
 from PyQt5.QtGui import (
@@ -33,7 +45,7 @@ from PyQt5.QtNetwork import QLocalServer, QLocalSocket
 # CONSTANTS
 # ============================================================
 APP_NAME        = "Kali Glass"
-APP_VERSION     = "2.0"
+APP_VERSION     = "2.1"
 LOCK_NAME       = "kali-glass-single-instance-lock"
 CONFIG_FILE     = os.path.expanduser(
     os.environ.get("KALI_GLASS_CONFIG", "~/.config/kali_glass/config.json")
@@ -45,19 +57,26 @@ LOG_FILE        = os.path.expanduser(
 
 # Slider limits
 BRIGHT_MIN, BRIGHT_MAX, BRIGHT_DEF   = 1, 100, 100
-CONTRAST_MIN, CONTRAST_MAX, CONTRAST_DEF = 10, 100, 50
+# Contrast: 50 = neutral (no change), <50 = less contrast, >50 = more contrast
+CONTRAST_MIN, CONTRAST_MAX, CONTRAST_DEF = 1, 100, 50
+# Gamma: 100 = neutral (1.0), 50 = 0.5, 200 = 2.0
 GAMMA_MIN, GAMMA_MAX, GAMMA_DEF      = 50, 200, 100
 TEMP_MIN, TEMP_MAX, TEMP_DEF         = 1000, 6500, 6500
 RGB_MIN, RGB_MAX, RGB_DEF            = 10, 100, 100
 VIB_MIN, VIB_MAX, VIB_DEF            = 0, 100, 0
 HUE_MIN, HUE_MAX, HUE_DEF            = 0, 360, 0
 
-DEBOUNCE_MS    = 150    # slider debounce delay
+# Increased debounce so slider drag doesn't spam commands
+DEBOUNCE_MS    = 300    # slider debounce delay (ms)
 SCHEDULE_MS    = 30000  # schedule check interval
 CMD_TIMEOUT    = 5      # subprocess timeout seconds
-STARTUP_APPLY_DELAYS_MS = (300, 2500, 7000, 15000)
+STARTUP_APPLY_DELAYS_MS = (500, 3000, 8000)
 NIGHT_TEMP     = 3200
 DAY_TEMP       = 6500
+
+# xrandr gamma clamping — safe range
+GAMMA_XRANDR_MIN = 0.1
+GAMMA_XRANDR_MAX = 5.0
 
 # ============================================================
 # LOGGING SETUP
@@ -82,22 +101,36 @@ def clamp(val, lo, hi):
         numeric = float(val)
     except (TypeError, ValueError):
         numeric = float(lo)
-
     bounded = max(lo, min(hi, numeric))
     if isinstance(lo, int) and isinstance(hi, int):
         return int(round(bounded))
     return bounded
 
+
 def get_display_env():
     return os.environ.get("DISPLAY", "")
 
+
 def has_display_session():
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def is_wayland():
+    return bool(
+        os.environ.get("WAYLAND_DISPLAY") or
+        os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland"
+    )
+
+
+def is_x11():
+    return bool(os.environ.get("DISPLAY")) and not is_wayland()
+
 
 def _normalize_cmd(cmd):
     if isinstance(cmd, (list, tuple)):
         return [str(part) for part in cmd]
     return shlex.split(str(cmd))
+
 
 def run_cmd(cmd, timeout=CMD_TIMEOUT, silent=False):
     env = os.environ.copy()
@@ -111,26 +144,29 @@ def run_cmd(cmd, timeout=CMD_TIMEOUT, silent=False):
         ok = result.returncode == 0
         if not ok and not silent:
             log.debug("cmd non-zero [%d]: %s | %s",
-                      result.returncode, display_cmd[:120], result.stderr.strip())
+                      result.returncode, display_cmd[:200], result.stderr.strip())
         return ok, result.stdout, result.stderr
     except subprocess.TimeoutExpired:
-        log.warning("Command timed out (%ds): %s", timeout, display_cmd[:120])
+        log.warning("Command timed out (%ds): %s", timeout, display_cmd[:200])
         return False, "", "timeout"
     except Exception as e:
         if not silent:
-            log.error("Command error: %s | %s", display_cmd[:120], e)
+            log.error("Command error: %s | %s", display_cmd[:200], e)
         return False, "", str(e)
 
+
 def detect_displays():
+    """Return list of connected output names via xrandr --query."""
     xrandr_path = shutil.which("xrandr")
     if not xrandr_path:
-        log.warning("xrandr not found")
+        log.warning("xrandr not found — cannot detect displays")
         return []
     if not get_display_env():
         log.debug("DISPLAY not set; skipping xrandr display detection")
         return []
-    ok, out, _ = run_cmd([xrandr_path, "--query"], silent=True)
+    ok, out, err = run_cmd([xrandr_path, "--query"], silent=True)
     if not ok or not out.strip():
+        log.warning("xrandr --query failed: %s", err.strip())
         return []
     monitors = []
     for line in out.strip().splitlines():
@@ -138,6 +174,7 @@ def detect_displays():
         if len(parts) >= 2 and parts[1] == "connected":
             monitors.append(parts[0])
     return monitors
+
 
 def config_time(hour, minute, default_hour, default_minute):
     try:
@@ -149,11 +186,49 @@ def config_time(hour, minute, default_hour, default_minute):
         return QTime(hour, minute)
     return QTime(default_hour, default_minute)
 
-def is_wayland():
-    return bool(
-        os.environ.get("WAYLAND_DISPLAY") or
-        os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland"
+
+def temp_to_gamma(kelvin):
+    """
+    Convert color temperature (K) to approximate RGB gamma offsets for xrandr.
+    Returns (r_factor, g_factor, b_factor) all near 1.0 at 6500K,
+    shifting warm (red↑, blue↓) at lower temps.
+    This is used when redshift is not available.
+    """
+    k = clamp(kelvin, 1000, 6500)
+    # Linear interpolation from 6500K (neutral) to 1000K (warm orange)
+    t = (6500 - k) / 5500.0   # 0.0 at 6500K, 1.0 at 1000K
+
+    r = clamp(1.0 + t * 0.0, 0.5, 1.0)           # red stays at 1.0
+    g = clamp(1.0 - t * 0.15, 0.5, 1.0)           # green drops slightly
+    b = clamp(1.0 - t * 0.55, 0.1, 1.0)           # blue drops more
+
+    return r, g, b
+
+
+# ============================================================
+# SETTINGS SNAPSHOT
+# ============================================================
+
+class DisplaySettings:
+    """Immutable snapshot of all slider values at a point in time."""
+    __slots__ = (
+        "brightness", "contrast", "gamma",
+        "temp", "r", "g", "b", "vib", "hue", "monitor"
     )
+
+    def __init__(self, brightness, contrast, gamma,
+                 temp, r, g, b, vib, hue, monitor):
+        self.brightness = brightness
+        self.contrast   = contrast
+        self.gamma      = gamma
+        self.temp       = temp
+        self.r          = r
+        self.g          = g
+        self.b          = b
+        self.vib        = vib
+        self.hue        = hue
+        self.monitor    = monitor
+
 
 # ============================================================
 # CUSTOM WIDGETS
@@ -400,10 +475,10 @@ class NeonPopup(QWidget):
         inner.setContentsMargins(18, 14, 18, 14)
         inner.setSpacing(5)
         self._build_ui(inner)
-        self.resize(340, 730)
+        self.resize(340, 750)
 
     def _build_ui(self, L):
-        # Header
+        # ── Header ────────────────────────────────────────
         hdr = QHBoxLayout()
         dot = QLabel("●")
         dot.setStyleSheet("color:#00e5ff;font-size:8px;background:transparent;")
@@ -432,13 +507,33 @@ class NeonPopup(QWidget):
         L.addWidget(sep)
         L.addSpacing(2)
 
-        # Display selector
+        # ── Wayland warning ───────────────────────────────
+        if is_wayland():
+            w = QLabel(
+                "⚠  Wayland detected — xrandr does NOT work on Wayland.\n"
+                "   Log out and choose an X11 session to use this app."
+            )
+            w.setStyleSheet(
+                "color:#ff6600;font-size:9px;background:rgba(255,100,0,15);"
+                "padding:6px;border-radius:4px;border:1px solid rgba(255,100,0,45);"
+            )
+            w.setWordWrap(True)
+            L.addWidget(w)
+        elif not get_display_env():
+            w = QLabel("⚠  DISPLAY not set — display control unavailable.")
+            w.setStyleSheet(
+                "color:#ffaa00;font-size:9px;background:rgba(255,170,0,15);"
+                "padding:4px;border-radius:4px;"
+            )
+            w.setWordWrap(True)
+            L.addWidget(w)
+
+        # ── Display selector ──────────────────────────────
         L.addWidget(SectionHeader("▸  DISPLAY TARGET"))
         dr = QHBoxLayout()
         self.combo = QComboBox()
         self.combo.setToolTip("Select which monitor to control")
         self._populate_displays()
-        # FIX: combo change now triggers update
         self.combo.currentIndexChanged.connect(
             lambda: self._engine.schedule_update()
         )
@@ -450,45 +545,37 @@ class NeonPopup(QWidget):
         dr.addWidget(rb)
         L.addLayout(dr)
 
-        if is_wayland():
-            w = QLabel("⚠  Wayland detected — redshift/xrandr may not work. Use X11.")
-            w.setStyleSheet(
-                "color:#ffaa00;font-size:9px;background:rgba(255,170,0,15);"
-                "padding:4px;border-radius:4px;border:1px solid rgba(255,170,0,35);"
-            )
-            w.setWordWrap(True)
-            L.addWidget(w)
-
         L.addSpacing(2)
         L.addWidget(SectionHeader("▸  BRIGHTNESS & DISPLAY"))
 
         self.sl_bright = NeonSlider(
             "Brightness", BRIGHT_MIN, BRIGHT_MAX, BRIGHT_DEF, "#e8e8e8", "%",
-            "Screen brightness (1–100%)"
+            "Screen brightness (1–100%)  →  xrandr 0.01–1.0"
         )
         self.sl_bright.changed.connect(lambda: self._engine.schedule_update())
         L.addWidget(self.sl_bright)
 
         self.sl_contrast = NeonSlider(
             "Contrast", CONTRAST_MIN, CONTRAST_MAX, CONTRAST_DEF, "#00d4f5", "",
-            "Gamma contrast (50 = neutral, >50 = more contrast)"
+            "Contrast (50 = neutral, >50 = more contrast, <50 = less)"
         )
         self.sl_contrast.changed.connect(lambda: self._engine.schedule_update())
         L.addWidget(self.sl_contrast)
 
         self.sl_gamma = NeonSlider(
             "Gamma", GAMMA_MIN, GAMMA_MAX, GAMMA_DEF, "#7799ff", "",
-            "Gamma multiplier (100 = neutral)"
+            "Gamma multiplier (100 = neutral = xrandr 1.0)"
         )
         self.sl_gamma.changed.connect(lambda: self._engine.schedule_update())
         L.addWidget(self.sl_gamma)
 
         L.addSpacing(2)
-        L.addWidget(SectionHeader("▸  NIGHT MODE"))
+        L.addWidget(SectionHeader("▸  COLOR TEMPERATURE"))
 
         self.sl_temp = NeonSlider(
             "Color Temperature", TEMP_MIN, TEMP_MAX, TEMP_DEF, "#ffaa00", "K",
-            "Color warmth: 6500K = daylight | 1000K = warm orange"
+            "Color warmth: 6500K = daylight | 1000K = warm orange\n"
+            "Applied as xrandr gamma offsets (no redshift dependency)"
         )
         self.sl_temp.slider.setInvertedAppearance(True)
         self.sl_temp.changed.connect(lambda: self._engine.schedule_update())
@@ -538,15 +625,18 @@ class NeonPopup(QWidget):
         L.addSpacing(2)
         L.addWidget(SectionHeader("▸  RGB CHANNELS"))
 
-        self.sl_r = NeonSlider("Red",   RGB_MIN, RGB_MAX, RGB_DEF, "#ff4455", "%", "Red gamma channel")
+        self.sl_r = NeonSlider("Red",   RGB_MIN, RGB_MAX, RGB_DEF, "#ff4455", "%",
+                               "Red gamma channel (100% = no change)")
         self.sl_r.changed.connect(lambda: self._engine.schedule_update())
         L.addWidget(self.sl_r)
 
-        self.sl_g = NeonSlider("Green", RGB_MIN, RGB_MAX, RGB_DEF, "#44ff88", "%", "Green gamma channel")
+        self.sl_g = NeonSlider("Green", RGB_MIN, RGB_MAX, RGB_DEF, "#44ff88", "%",
+                               "Green gamma channel (100% = no change)")
         self.sl_g.changed.connect(lambda: self._engine.schedule_update())
         L.addWidget(self.sl_g)
 
-        self.sl_b = NeonSlider("Blue",  RGB_MIN, RGB_MAX, RGB_DEF, "#4488ff", "%", "Blue gamma channel")
+        self.sl_b = NeonSlider("Blue",  RGB_MIN, RGB_MAX, RGB_DEF, "#4488ff", "%",
+                               "Blue gamma channel (100% = no change)")
         self.sl_b.changed.connect(lambda: self._engine.schedule_update())
         L.addWidget(self.sl_b)
 
@@ -591,7 +681,6 @@ class NeonPopup(QWidget):
         self.combo.blockSignals(True)
         current = self.combo.currentText()
         self.combo.clear()
-
         self.combo.addItem("All Displays (Default)")
 
         monitors = detect_displays()
@@ -605,6 +694,8 @@ class NeonPopup(QWidget):
                 self.combo.setCurrentIndex(0)
         else:
             self.combo.setCurrentIndex(0)
+            if not is_wayland() and get_display_env():
+                log.warning("No connected outputs detected by xrandr --query")
         self.combo.blockSignals(False)
 
     def _toggle_sched(self, checked):
@@ -631,7 +722,7 @@ class NeonPopup(QWidget):
 
     def current_display(self):
         txt = self.combo.currentText()
-        return None if (txt == "Default" or txt == "All Displays (Default)" or not txt) else txt
+        return None if (not txt or "All Displays" in txt) else txt
 
     def set_night_status(self, is_night):
         if is_night:
@@ -655,7 +746,6 @@ class NeonPopup(QWidget):
 
     def show_near_mouse(self):
         cursor = QCursor.pos()
-        # FIX: Find the actual screen where the cursor resides to support multi-monitor setups correctly
         active_screen = QApplication.screenAt(cursor)
         if not active_screen:
             active_screen = QApplication.primaryScreen()
@@ -676,30 +766,47 @@ class NeonPopup(QWidget):
 # ============================================================
 
 class DisplayEngine(QWidget):
+    """
+    Manages all display-setting logic.
+
+    Anti-flicker design
+    -------------------
+    * One QProcess slot handles one xrandr command at a time.
+    * While a command is running we do NOT kill it.
+    * We store only the *newest* pending settings snapshot.
+    * When the running command finishes we apply the pending snapshot
+      (if any) and clear it.  Old intermediate settings are dropped.
+    * The debounce timer (DEBOUNCE_MS = 300 ms) already batches rapid
+      slider changes before any command is issued.
+    """
+
     def __init__(self):
         super().__init__()
 
-        # Cache binary paths
-        self.redshift_path = shutil.which("redshift")
-        self.xrandr_path = shutil.which("xrandr")
+        self.xrandr_path  = shutil.which("xrandr")
+        self.redshift_path = shutil.which("redshift")   # kept for quit reset
 
-        # Initialize native QProcess to manage execution asynchronously (non-blocking)
-        self.process = QProcess(self)
-        self.process.finished.connect(self._on_process_finished)
-        self.process.errorOccurred.connect(self._on_process_error)
+        # QProcess for asynchronous, non-blocking xrandr calls
+        self._proc = QProcess(self)
+        self._proc.finished.connect(self._on_proc_finished)
+        self._proc.errorOccurred.connect(self._on_proc_error)
 
-        # Track schedule state transitions to prevent overwriting manual settings
+        # "Latest wins" state
+        self._pending_settings = None   # newest settings waiting to run
+        self._proc_busy        = False  # True while xrandr is running
+        self._last_cmd_str     = ""     # for diagnostics
+
         self._last_schedule_state = None
-        self._last_applied_info = None
-        self._process_queue = []
-        self._current_process_label = ""
-        self._apply_had_error = False
+        self._last_applied_info   = None
+        self._apply_had_error     = False
+
         app = QApplication.instance()
         if app:
-            app.aboutToQuit.connect(self._stop_display_process)
+            app.aboutToQuit.connect(self._stop_proc_cleanly)
 
         self.ui = NeonPopup(self)
 
+        # Debounce timer — slider changes collect here before firing
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(DEBOUNCE_MS)
@@ -709,25 +816,74 @@ class DisplayEngine(QWidget):
         self._sched_timer.timeout.connect(self._check_auto_schedule)
         self._sched_timer.start(SCHEDULE_MS)
 
-        self._check_dependencies()
+        self._run_startup_diagnostics()
         self.load_settings()
         self._init_tray()
 
-        # Connect schedule toggle to state transitions
         self.ui.check_auto.toggled.connect(self.on_schedule_toggled)
 
         for delay_ms in STARTUP_APPLY_DELAYS_MS:
             QTimer.singleShot(delay_ms, self._apply_startup_settings)
+
         log.info("%s v%s started", APP_NAME, APP_VERSION)
 
-    def _check_dependencies(self):
-        missing = []
-        if not shutil.which("redshift"):
-            missing.append("redshift")
-        if not shutil.which("xrandr"):
-            missing.append("xrandr (x11-xserver-utils)")
-        if missing:
-            log.warning("Missing tools: %s", ", ".join(missing))
+    # ----------------------------------------------------------
+    # Diagnostics
+    # ----------------------------------------------------------
+
+    def _run_startup_diagnostics(self):
+        """Log environment info useful for debugging display issues."""
+        session_type = os.environ.get("XDG_SESSION_TYPE", "unknown")
+        display_val  = os.environ.get("DISPLAY", "(not set)")
+        wayland_val  = os.environ.get("WAYLAND_DISPLAY", "(not set)")
+        xrandr_path  = self.xrandr_path or "(not found)"
+        redshift_path = self.redshift_path or "(not found)"
+
+        log.info("=== STARTUP DIAGNOSTICS ===")
+        log.info("  Session type    : %s", session_type)
+        log.info("  DISPLAY         : %s", display_val)
+        log.info("  WAYLAND_DISPLAY : %s", wayland_val)
+        log.info("  xrandr path     : %s", xrandr_path)
+        log.info("  redshift path   : %s", redshift_path)
+
+        if is_wayland():
+            log.warning("  *** Wayland session detected — xrandr will NOT work ***")
+            log.warning("  *** Log out and select an X11 session for full control ***")
+        elif not get_display_env():
+            log.warning("  *** DISPLAY variable not set — cannot run xrandr ***")
+        else:
+            log.info("  Backend         : xrandr (primary)")
+            outputs = detect_displays()
+            if outputs:
+                log.info("  Detected outputs: %s", ", ".join(outputs))
+            else:
+                log.warning("  No connected outputs detected by xrandr --query")
+        log.info("=== END DIAGNOSTICS ===")
+
+    def run_backend_diagnostics(self):
+        """On-demand diagnostics (called from tray menu)."""
+        self._run_startup_diagnostics()
+        outputs = detect_displays()
+        session = os.environ.get("XDG_SESSION_TYPE", "unknown")
+        display = os.environ.get("DISPLAY", "not set")
+        lines = [
+            f"Session type : {session}",
+            f"DISPLAY      : {display}",
+            f"xrandr       : {self.xrandr_path or 'not found'}",
+            f"redshift     : {self.redshift_path or 'not found'}",
+            f"Outputs      : {', '.join(outputs) if outputs else 'none detected'}",
+            f"Backend      : xrandr (primary)",
+            f"Last command : {self._last_cmd_str or 'none'}",
+            "",
+            "See log for full details:",
+            LOG_FILE,
+        ]
+        QMessageBox.information(None, "Kali Glass — Backend Diagnostics",
+                                "\n".join(lines))
+
+    # ----------------------------------------------------------
+    # Settings persistence
+    # ----------------------------------------------------------
 
     def load_settings(self):
         if not os.path.exists(CONFIG_FILE):
@@ -736,7 +892,6 @@ class DisplayEngine(QWidget):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 d = json.load(f)
-            # FIX: use unambiguous key names (old "g" key collision fixed)
             self.ui.sl_bright.set_value(  clamp(d.get("bright",   BRIGHT_DEF),   BRIGHT_MIN,   BRIGHT_MAX))
             self.ui.sl_contrast.set_value(clamp(d.get("contrast", CONTRAST_DEF), CONTRAST_MIN, CONTRAST_MAX))
             self.ui.sl_gamma.set_value(   clamp(d.get("gamma",    GAMMA_DEF),    GAMMA_MIN,    GAMMA_MAX))
@@ -746,15 +901,15 @@ class DisplayEngine(QWidget):
             self.ui.sl_b.set_value(       clamp(d.get("blue",     RGB_DEF),      RGB_MIN,      RGB_MAX))
             self.ui.sl_vib.set_value(     clamp(d.get("vib",      VIB_DEF),      VIB_MIN,      VIB_MAX))
             self.ui.sl_hue.set_value(     clamp(d.get("hue",      HUE_DEF),      HUE_MIN,      HUE_MAX))
-            self.ui.time_on.setTime(config_time(d.get("on_hour"), d.get("on_min"), 19, 0))
-            self.ui.time_off.setTime(config_time(d.get("off_hour"), d.get("off_min"), 6, 0))
+            self.ui.time_on.setTime(config_time(d.get("on_hour"),  d.get("on_min"),  19, 0))
+            self.ui.time_off.setTime(config_time(d.get("off_hour"), d.get("off_min"), 6,  0))
             self.ui.check_auto.setChecked(bool(d.get("auto_schedule", False)))
             saved_disp = d.get("display", "")
             if saved_disp:
                 idx = self.ui.combo.findText(saved_disp)
                 if idx >= 0:
                     self.ui.combo.setCurrentIndex(idx)
-            log.info("Settings loaded")
+            log.info("Settings loaded from %s", CONFIG_FILE)
         except Exception as e:
             log.error("Load failed: %s — using defaults", e)
 
@@ -764,11 +919,11 @@ class DisplayEngine(QWidget):
             data = {
                 "bright":        self.ui.sl_bright.value(),
                 "contrast":      self.ui.sl_contrast.value(),
-                "gamma":         self.ui.sl_gamma.value(),   # was "g" — FIX
+                "gamma":         self.ui.sl_gamma.value(),
                 "temp":          self.ui.sl_temp.value(),
                 "red":           self.ui.sl_r.value(),
-                "green":         self.ui.sl_g.value(),       # was "g" — FIX
-                "blue":          self.ui.sl_b.value(),       # was "bb" — FIX
+                "green":         self.ui.sl_g.value(),
+                "blue":          self.ui.sl_b.value(),
                 "vib":           self.ui.sl_vib.value(),
                 "hue":           self.ui.sl_hue.value(),
                 "auto_schedule": self.ui.check_auto.isChecked(),
@@ -783,7 +938,12 @@ class DisplayEngine(QWidget):
         except Exception as e:
             log.error("Save failed: %s", e)
 
+    # ----------------------------------------------------------
+    # Debounce & apply entry points
+    # ----------------------------------------------------------
+
     def schedule_update(self):
+        """Called on every slider valueChanged — restarts debounce timer."""
         self._debounce.start()
 
     def _apply_startup_settings(self):
@@ -793,159 +953,189 @@ class DisplayEngine(QWidget):
             self.apply_settings()
 
     def apply_settings(self):
+        """
+        Public entry point.  Captures a settings snapshot, saves config,
+        and triggers the "latest wins" dispatch.
+        """
         self.save_settings()
 
-        if not has_display_session():
-            self.ui.status.set_warn("No graphical display session")
-            log.warning("No DISPLAY or WAYLAND_DISPLAY set; skipping display command")
+        if is_wayland():
+            self.ui.status.set_warn("Wayland — xrandr not supported. Use X11.")
+            log.warning("Wayland session: skipping xrandr display command")
             return
 
-        br   = clamp(self.ui.sl_bright.value()   / 100.0, 0.01, 1.0)
-        temp = clamp(self.ui.sl_temp.value(),    TEMP_MIN, TEMP_MAX)
-        con  = self.ui.sl_contrast.value()
-        gam  = clamp(self.ui.sl_gamma.value()   / 100.0,  0.5, 2.0)
+        if not get_display_env():
+            self.ui.status.set_warn("No graphical display session (DISPLAY not set)")
+            log.warning("DISPLAY not set; skipping display command")
+            return
 
-        rm   = clamp(self.ui.sl_r.value()        / 100.0, 0.1, 1.0)
-        gm   = clamp(self.ui.sl_g.value()        / 100.0, 0.1, 1.0)
-        bm   = clamp(self.ui.sl_b.value()        / 100.0, 0.1, 1.0)
+        if not self.xrandr_path:
+            self.ui.status.set_err("xrandr not found — install x11-xserver-utils")
+            log.error("xrandr not found; cannot apply display settings")
+            return
 
-        # FIX: contrast factor — 50 = neutral, >50 boosts, <50 reduces
-        contrast_factor = 0.6 + (con - CONTRAST_MIN) / (CONTRAST_MAX - CONTRAST_MIN) * 0.9
+        # Take a snapshot of current slider values
+        snap = DisplaySettings(
+            brightness = self.ui.sl_bright.value(),
+            contrast   = self.ui.sl_contrast.value(),
+            gamma      = self.ui.sl_gamma.value(),
+            temp       = self.ui.sl_temp.value(),
+            r          = self.ui.sl_r.value(),
+            g          = self.ui.sl_g.value(),
+            b          = self.ui.sl_b.value(),
+            vib        = self.ui.sl_vib.value(),
+            hue        = self.ui.sl_hue.value(),
+            monitor    = self.ui.current_display(),
+        )
+
+        if self._proc_busy:
+            # A command is running — store newest settings, drop any older pending
+            self._pending_settings = snap
+            log.debug("xrandr busy — queued latest settings snapshot")
+        else:
+            self._dispatch(snap)
+
+    # ----------------------------------------------------------
+    # Settings → xrandr gamma computation
+    # ----------------------------------------------------------
+
+    @staticmethod
+    def _compute_gamma(snap):
+        """
+        Compute (brightness_xrandr, gamma_str) from a DisplaySettings snapshot.
+
+        brightness_xrandr : float  0.01–1.0  (xrandr --brightness)
+        gamma_str         : str    "R:G:B"   (xrandr --gamma)
+
+        Rules
+        -----
+        * brightness 100 → xrandr 1.0, brightness 50 → 0.5, brightness 1 → 0.01
+        * contrast 50 → no change (factor 1.0)
+        * gamma slider 100 → multiplier 1.0
+        * RGB sliders 100 → no channel shift
+        * temperature modifies channel ratios (no redshift needed)
+        """
+        br_xrandr = clamp(snap.brightness / 100.0, 0.01, 1.0)
+
+        # Gamma slider: 100 → 1.0, 50 → 0.5, 200 → 2.0
+        gam = clamp(snap.gamma / 100.0, 0.1, 3.0)
+
+        # Contrast: 50 = neutral (1.0), 1 ≈ 0.51, 100 = 1.5
+        # 0.5 + contrast/100 → at 50: 0.5+0.5=1.0 (exact neutral) ✓
+        contrast_factor = 0.5 + snap.contrast / 100.0
+
         base_gamma = gam * contrast_factor
 
-        # Saturation boost (FIX: does NOT modify brightness)
-        vib = self.ui.sl_vib.value()
-        if vib > 0:
-            vf  = vib / 200.0
-            max_ch = max(rm, gm, bm)
-            rm = clamp(rm + (max_ch - rm) * vf, 0.1, 1.0)
-            gm = clamp(gm + (max_ch - gm) * vf, 0.1, 1.0)
-            bm = clamp(bm + (max_ch - bm) * vf, 0.1, 1.0)
+        # RGB channel multipliers: 100% → 1.0, 10% → 0.1
+        rm = clamp(snap.r / 100.0, 0.1, 1.0)
+        gm = clamp(snap.g / 100.0, 0.1, 1.0)
+        bm = clamp(snap.b / 100.0, 0.1, 1.0)
+
+        # Color temperature — shift channel ratios
+        t_r, t_g, t_b = temp_to_gamma(snap.temp)
+        rm = clamp(rm * t_r, 0.1, 1.0)
+        gm = clamp(gm * t_g, 0.1, 1.0)
+        bm = clamp(bm * t_b, 0.1, 1.0)
+
+        # Saturation boost
+        if snap.vib > 0:
+            vf      = snap.vib / 200.0
+            max_ch  = max(rm, gm, bm)
+            rm = clamp(rm + (max_ch - rm) * vf, 0.05, 1.0)
+            gm = clamp(gm + (max_ch - gm) * vf, 0.05, 1.0)
+            bm = clamp(bm + (max_ch - bm) * vf, 0.05, 1.0)
 
         # Hue shift
-        hue = self.ui.sl_hue.value()
-        if hue != 0:
-            angle = math.radians(hue)
-            rm = clamp(rm * (1.0 + 0.15 * math.sin(angle)),          0.1, 1.0)
-            gm = clamp(gm * (1.0 + 0.15 * math.sin(angle + 2.094)),  0.1, 1.0)
-            bm = clamp(bm * (1.0 + 0.15 * math.sin(angle + 4.189)),  0.1, 1.0)
+        if snap.hue != 0:
+            angle = math.radians(snap.hue)
+            rm = clamp(rm * (1.0 + 0.15 * math.sin(angle)),          0.05, 1.0)
+            gm = clamp(gm * (1.0 + 0.15 * math.sin(angle + 2.094)),  0.05, 1.0)
+            bm = clamp(bm * (1.0 + 0.15 * math.sin(angle + 4.189)),  0.05, 1.0)
 
-        # FIX: gamma per channel = base_gamma * channel_multiplier (not division)
-        g_r = clamp(base_gamma * rm, 0.1, 5.0)
-        g_g = clamp(base_gamma * gm, 0.1, 5.0)
-        g_b = clamp(base_gamma * bm, 0.1, 5.0)
+        # Final per-channel gamma (clamped to safe xrandr range)
+        g_r = clamp(base_gamma * rm, GAMMA_XRANDR_MIN, GAMMA_XRANDR_MAX)
+        g_g = clamp(base_gamma * gm, GAMMA_XRANDR_MIN, GAMMA_XRANDR_MAX)
+        g_b = clamp(base_gamma * bm, GAMMA_XRANDR_MIN, GAMMA_XRANDR_MAX)
 
-        monitor = self.ui.current_display()
+        gamma_str = f"{g_r:.3f}:{g_g:.3f}:{g_b:.3f}"
+        return br_xrandr, gamma_str
 
-        # Stop previous execution to keep it non-blocking and responsive
-        if self.process.state() != QProcess.NotRunning:
-            self._process_queue = []
-            self.process.terminate()
-            if not self.process.waitForFinished(100):
-                self.process.kill()
-                self.process.waitForFinished(250)
+    # ----------------------------------------------------------
+    # xrandr command building
+    # ----------------------------------------------------------
 
-        # Store context for status bar updates in finished signal
-        self._last_applied_info = (temp, br, gam)
-
-        gamma_arg = f"{g_r:.3f}:{g_g:.3f}:{g_b:.3f}"
-        commands = []
-
-        if self.redshift_path:
-            # redshift handles the normal 10-100 range. xrandr applies a
-            # secondary factor only for 1-9% and resets that factor to 1.0
-            # for normal brightness, so 80-100 still changes via redshift.
-            redshift_br = clamp(br, 0.1, 1.0)
-            cmd_args = [
-                "-P", "-O", str(temp),
-                "-b", f"{redshift_br:.3f}",
-                "-g", gamma_arg,
-            ]
-            if monitor:
-                try:
-                    monitors = detect_displays()
-                    if monitor in monitors:
-                        crtc_idx = monitors.index(monitor)
-                        cmd_args = ["-m", f"randr:crtc={crtc_idx}"] + cmd_args
-                except Exception as e:
-                    log.warning("Failed to determine CRTC for %s: %s", monitor, e)
-
-            log.debug("Apply redshift: %s %s", self.redshift_path, cmd_args)
-            commands.append((self.redshift_path, cmd_args, "redshift"))
-
-            if self.xrandr_path:
-                xrandr_factor = clamp(br / redshift_br, 0.01, 1.0)
-                xrandr_args = self._build_xrandr_args(monitor, xrandr_factor)
-                if xrandr_args:
-                    log.debug("Apply xrandr brightness: %s %s",
-                              self.xrandr_path, xrandr_args)
-                    commands.append((self.xrandr_path, xrandr_args, "xrandr"))
-            elif br < 0.1:
-                log.warning("Brightness below 10%% requires xrandr; redshift will clamp it")
-
-        elif self.xrandr_path:
-            xrandr_args = self._build_xrandr_args(monitor, br, gamma_arg)
-            if xrandr_args:
-                log.debug("Apply xrandr: %s %s", self.xrandr_path, xrandr_args)
-                commands.append((self.xrandr_path, xrandr_args, "xrandr"))
-            else:
-                self.ui.status.set_warn("No monitors detected")
-        else:
-            self.ui.status.set_warn("No redshift or xrandr available")
-            log.warning("No display control tool found")
-            return
-
-        if commands:
-            self._run_display_commands(commands)
-
-    def _build_xrandr_args(self, monitor, brightness, gamma=None):
-        outputs = [monitor] if monitor else detect_displays()
-        if not outputs:
-            return []
-
+    def _build_xrandr_args(self, outputs, brightness, gamma_str):
+        """
+        Build xrandr argument list that applies brightness + gamma in one
+        command for all requested outputs.  This is the single stable path.
+        """
         args = []
         for output in outputs:
-            args.extend(["--output", output, "--brightness", f"{brightness:.3f}"])
-            if gamma:
-                args.extend(["--gamma", gamma])
+            args += [
+                "--output", output,
+                "--brightness", f"{brightness:.3f}",
+                "--gamma", gamma_str,
+            ]
         return args
 
-    def _run_display_commands(self, commands):
-        self._process_queue = list(commands)
-        self._apply_had_error = False
-        self._start_next_display_process()
+    # ----------------------------------------------------------
+    # Process dispatch (latest-wins)
+    # ----------------------------------------------------------
 
-    def _start_next_display_process(self):
-        if not self._process_queue:
-            self._finish_apply_status()
+    def _dispatch(self, snap):
+        """Launch xrandr with the given settings snapshot."""
+        outputs = ([snap.monitor] if snap.monitor else detect_displays())
+        if not outputs:
+            self.ui.status.set_warn("No displays detected — check xrandr --query")
+            log.warning("No connected xrandr outputs; nothing to apply")
             return
 
-        program, args, label = self._process_queue.pop(0)
-        self._current_process_label = label
-        self.process.start(program, args)
-        if not self.process.waitForStarted(500):
-            err = self.process.errorString()
-            self._apply_had_error = True
-            log.warning("Failed to start %s (%s): %s", label, program, err)
-            self._start_next_display_process()
+        br_xrandr, gamma_str = self._compute_gamma(snap)
+        args = self._build_xrandr_args(outputs, br_xrandr, gamma_str)
 
-    def _stop_display_process(self):
-        self._process_queue = []
-        if self.process.state() == QProcess.NotRunning:
-            return
-        self.process.terminate()
-        if not self.process.waitForFinished(500):
-            self.process.kill()
-            self.process.waitForFinished(500)
+        cmd_str = shlex.join([self.xrandr_path] + args)
+        self._last_cmd_str = cmd_str
+        log.info("xrandr: %s", cmd_str)
 
-    def _on_process_finished(self, exit_code, exit_status):
+        self._last_applied_info = (snap.temp, br_xrandr, snap.gamma / 100.0)
+        self._apply_had_error   = False
+        self._proc_busy         = True
+
+        self._proc.start(self.xrandr_path, args)
+        if not self._proc.waitForStarted(1000):
+            err = self._proc.errorString()
+            log.error("Failed to start xrandr: %s", err)
+            self.ui.status.set_err(f"xrandr failed to start: {err}")
+            self._proc_busy = False
+            self._apply_pending()
+
+    def _apply_pending(self):
+        """If there is a pending settings snapshot, dispatch it now."""
+        if self._pending_settings is not None:
+            snap = self._pending_settings
+            self._pending_settings = None
+            self._dispatch(snap)
+
+    def _on_proc_finished(self, exit_code, exit_status):
+        self._proc_busy = False
+
         if exit_code != 0 or exit_status != QProcess.NormalExit:
-            err = self.process.readAllStandardError().data().decode().strip()
-            log.warning("%s exited with code %d: %s",
-                        self._current_process_label, exit_code, err)
+            err = bytes(self._proc.readAllStandardError()).decode(errors="replace").strip()
+            log.warning("xrandr exited %d: %s", exit_code, err)
             self._apply_had_error = True
+            self.ui.status.set_warn(f"xrandr error (code {exit_code})")
+            log.warning("Last command: %s", self._last_cmd_str)
+        else:
+            self._finish_apply_status()
 
-        self._start_next_display_process()
+        self._apply_pending()
+
+    def _on_proc_error(self, process_error):
+        self._proc_busy = False
+        self._apply_had_error = True
+        log.error("xrandr process error %s: %s", process_error,
+                  self._proc.errorString())
+        self._apply_pending()
 
     def _finish_apply_status(self):
         if self._apply_had_error:
@@ -953,12 +1143,19 @@ class DisplayEngine(QWidget):
             return
         if self._last_applied_info:
             temp, br, gam = self._last_applied_info
-            self.ui.status.set_ok(f"{temp}K  {int(br*100)}%  γ={gam:.2f}")
+            self.ui.status.set_ok(f"{temp}K  {int(br * 100)}%  γ={gam:.2f}")
 
-    def _on_process_error(self, process_error):
-        self._apply_had_error = True
-        log.warning("Display command failed to start or run: %s (%s)",
-                    self.process.errorString(), process_error)
+    def _stop_proc_cleanly(self):
+        self._pending_settings = None
+        if self._proc.state() != QProcess.NotRunning:
+            self._proc.terminate()
+            if not self._proc.waitForFinished(500):
+                self._proc.kill()
+                self._proc.waitForFinished(300)
+
+    # ----------------------------------------------------------
+    # Schedule
+    # ----------------------------------------------------------
 
     def on_schedule_toggled(self, checked):
         if checked:
@@ -977,26 +1174,29 @@ class DisplayEngine(QWidget):
         t_on  = self.ui.time_on.time().toPyTime()
         t_off = self.ui.time_off.time().toPyTime()
 
-        # FIX: correct overnight span logic
+        # Correct overnight span logic
         if t_on <= t_off:
             is_night = t_on <= now < t_off
         else:
             is_night = now >= t_on or now < t_off
 
-        # Only apply schedule preset if the state has transitioned or we force it
         if force or self._last_schedule_state != is_night:
             self._last_schedule_state = is_night
             if is_night:
-                log.info("Schedule transition → night mode")
+                log.info("Schedule → night mode")
                 self.ui.sl_temp.set_value(NIGHT_TEMP)
                 self.ui.sl_bright.set_value(70)
                 self.ui.set_night_status(True)
             else:
-                log.info("Schedule transition → day mode")
+                log.info("Schedule → day mode")
                 self.ui.sl_temp.set_value(DAY_TEMP)
                 self.ui.sl_bright.set_value(BRIGHT_DEF)
                 self.ui.set_night_status(False)
             self.apply_settings()
+
+    # ----------------------------------------------------------
+    # Tray
+    # ----------------------------------------------------------
 
     def _init_tray(self):
         pix = QPixmap(64, 64)
@@ -1038,6 +1238,10 @@ class DisplayEngine(QWidget):
         a_night.triggered.connect(self.ui._set_night_mode)
         menu.addAction(a_night)
         menu.addSeparator()
+        a_diag  = QAction("🔍  Test Backend", self)
+        a_diag.triggered.connect(self.run_backend_diagnostics)
+        menu.addAction(a_diag)
+        menu.addSeparator()
         a_quit  = QAction("✕  Quit", self)
         a_quit.triggered.connect(self._quit_cleanly)
         menu.addAction(a_quit)
@@ -1053,15 +1257,22 @@ class DisplayEngine(QWidget):
 
     def _quit_cleanly(self):
         log.info("Quit requested — restoring display defaults")
-        if self.redshift_path:
-            run_cmd([self.redshift_path, "-x"], silent=True)
-        if self.xrandr_path:
+        # Cancel any pending actions
+        self._pending_settings = None
+        self._stop_proc_cleanly()
+
+        # Reset all outputs to neutral
+        if self.xrandr_path and get_display_env() and not is_wayland():
             for m in detect_displays():
                 run_cmd(
                     [self.xrandr_path, "--output", m,
                      "--brightness", "1.0", "--gamma", "1.0:1.0:1.0"],
                     silent=True
                 )
+        # Also reset redshift if available
+        if self.redshift_path:
+            run_cmd([self.redshift_path, "-x"], silent=True)
+
         self.save_settings()
         QApplication.instance().quit()
 
@@ -1074,7 +1285,7 @@ def main():
     if not has_display_session():
         print(
             "ERROR: No graphical display session detected. "
-            "Start Kali Glass from X11/Wayland or set DISPLAY."
+            "Start Kali Glass from X11 or set DISPLAY."
         )
         sys.exit(1)
 
@@ -1095,7 +1306,7 @@ def main():
     if not srv.listen(LOCK_NAME):
         log.warning("Could not acquire singleton lock — continuing anyway")
 
-    # FIX: Wait for tray with timeout — not an infinite blocking loop
+    # Wait for tray with timeout
     deadline = time.time() + 10
     while not QSystemTrayIcon.isSystemTrayAvailable() and time.time() < deadline:
         app.processEvents()

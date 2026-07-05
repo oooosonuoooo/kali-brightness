@@ -1,21 +1,25 @@
 # Kali Glass Controller
 
-Kali Glass Controller is a PyQt5 tray app for X11 display tuning on Kali Linux and other desktop Linux distributions. It controls brightness, gamma, RGB balance, color temperature, night mode, and simple scheduled day/night switching through `redshift` and `xrandr`.
+Kali Glass Controller is a PyQt5 tray app for X11 display tuning on Kali Linux and other desktop Linux distributions.  It controls brightness, gamma, RGB balance, colour temperature, night mode, and scheduled day/night switching entirely through `xrandr`.
+
+> **Full control requires an X11 session.**  Wayland restricts global gamma and brightness tools — the app will display a clear warning and skip display commands on Wayland.
 
 ## Features
 
 | Feature | Notes |
 | --- | --- |
-| Brightness | Software brightness from 1% to 100% using `xrandr` when available. |
-| Color temperature | Uses `redshift` one-shot mode for warm/cool display output. |
-| RGB gamma | Separate red, green, and blue channel multipliers. |
-| Contrast/gamma | Gamma-based contrast and multiplier controls. |
-| Digital vibrance | Saturation-style boost without raising brightness. |
-| Hue shift | Small RGB rotation effect for tint adjustment. |
-| Auto schedule | Applies day/night presets at configured times. |
-| Multi-monitor | Detects X11 outputs through `xrandr`; can target all displays or one output. |
+| Brightness | Software brightness 1–100 % mapped directly to `xrandr --brightness` (1 % → 0.01, 100 % → 1.0). |
+| Contrast | Contrast slider 50 = neutral (no change), > 50 = higher contrast, < 50 = lower contrast. |
+| Gamma | Gamma slider 100 = neutral (1.0), 50 = 0.5, 200 = 2.0. Applied per channel via `xrandr --gamma`. |
+| RGB channels | Separate red, green, and blue gamma multipliers, clamped to safe xrandr values. |
+| Colour temperature | Warm/cool shift (1 000 K – 6 500 K) implemented as RGB gamma offsets — no redshift dependency. |
+| Night mode | One-click warm preset (3 200 K, 70 % brightness). |
+| Auto schedule | Applies day/night presets at user-configured times. |
+| Multi-monitor | Detects X11 outputs through `xrandr --query`; targets all displays or a single output. |
+| Anti-flicker | 300 ms debounce + "latest wins" logic: never kills a running command; applies only the newest pending settings after the current command completes. |
+| Diagnostics | Startup log and "Test Backend" tray action shows session type, DISPLAY, xrandr path, detected outputs, last command, and errors. |
 | Tray app | Floating panel with tray menu and single-instance lock. |
-| Safe fallback | Missing tools are reported in the UI/log instead of crashing the app. |
+| Safe fallback | Missing tools are reported in the UI and log instead of crashing. |
 
 ## Requirements
 
@@ -23,10 +27,14 @@ Kali Glass Controller is a PyQt5 tray app for X11 display tuning on Kali Linux a
 | --- | --- |
 | `python3` | Runtime. |
 | `python3-pyqt5` | GUI framework. |
-| `redshift` | Primary brightness/color-temperature backend. |
-| `x11-xserver-utils` | Provides `xrandr` for display detection and fallback gamma control. |
+| `x11-xserver-utils` | Provides `xrandr` for all display control. |
+| `redshift` | Optional; only used for colour-temperature reset on quit. |
 
-Full functionality requires an X11 desktop session. Wayland sessions usually block `redshift` and `xrandr` display changes.
+### Why X11 is required
+
+`xrandr` is an X11-only protocol tool.  On Wayland it cannot connect to the display and will fail silently or with an error.  The Kali Glass UI will still open under Wayland, but all display-control sliders will be disabled and a warning banner is shown.
+
+**Fix:** log out of your Wayland session and select "Kali Linux (X11)" or "GNOME on Xorg" at the login screen.
 
 ## Install
 
@@ -76,7 +84,7 @@ From source:
 python3 kali_glass.py
 ```
 
-The tray icon toggles the panel with left click and opens a menu with right click. Settings are saved automatically in:
+The tray icon toggles the panel with left click and opens a menu with right click.  Settings are saved automatically in:
 
 ```text
 ~/.config/kali_glass/config.json
@@ -94,6 +102,29 @@ For temporary runs, override the paths without touching your live profile:
 KALI_GLASS_CONFIG=/tmp/kali-glass-config.json \
 KALI_GLASS_LOG=/tmp/kali-glass.log \
 python3 kali_glass.py
+```
+
+## Manual test commands
+
+Use these to verify the X11 backend independently:
+
+```bash
+# List connected outputs
+xrandr --query
+
+# Dim a specific output to 70 %
+xrandr --output HDMI-1 --brightness 0.7
+
+# Apply a warm colour shift
+xrandr --output HDMI-1 --gamma 1.0:0.85:0.45
+
+# Reset a specific output to neutral
+xrandr --output HDMI-1 --brightness 1.0 --gamma 1.0:1.0:1.0
+
+# Reset all outputs to neutral (shell loop)
+for output in $(xrandr --query | awk '/ connected/{print $1}'); do
+  xrandr --output "$output" --brightness 1.0 --gamma 1.0:1.0:1.0
+done
 ```
 
 ## Uninstall
@@ -116,42 +147,61 @@ Remove only the autostart entry:
 sudo ./install.sh --disable-autostart
 ```
 
-## Development Checks
+## Development checks
 
 ```bash
-python3 -m py_compile kali_glass.py
-bash -n install.sh
+python3 -m py_compile kali_glass.py && echo "Syntax OK"
+bash -n install.sh && echo "Shell syntax OK"
+```
+
+Optional linting:
+
+```bash
 ruff check .
 pylint kali_glass.py
 ```
 
-`shellcheck install.sh` is useful when ShellCheck is installed.
+## Known limitations
 
-## Known Limitations
-
-| Environment | Behavior |
+| Environment | Behaviour |
 | --- | --- |
-| X11 | Supported path with `redshift`/`xrandr`. |
-| Wayland | App can start, but display commands may fail because Wayland restricts global gamma/brightness tools. |
-| VM/VirtualBox | Gamma and brightness may be ignored by the virtual display driver. |
-| SSH/headless | The app exits cleanly when no graphical display session is available. |
-| Nvidia proprietary driver | `xrandr --gamma` may be ineffective; `redshift` may work better. |
-| Missing `redshift` | Falls back to `xrandr` brightness/gamma where possible. |
-| Missing `xrandr` | Display list and fallback control are unavailable; the app reports the missing tool. |
+| **X11** | Full support via `xrandr`. |
+| **Wayland** | App opens with a warning banner; display changes are skipped. Log out and choose an X11 session. |
+| **VM / VirtualBox** | Virtual display drivers often ignore gamma ramps.  Enable 3D acceleration or switch to VMSVGA/VBoxSVGA in VM settings. |
+| **SSH / headless** | App exits cleanly when no graphical session is detected. |
+| **Nvidia proprietary** | `xrandr --gamma` may be ineffective on some Nvidia setups; try switching to the Nouveau driver or use `nvidia-settings`. |
+| **Missing xrandr** | All display control is unavailable; the UI shows an error. |
 
-## Project Layout
+## Project layout
 
 ```text
-kali_glass.py       Main PyQt5 tray application.
+kali_glass.py       Main PyQt5 tray application (xrandr backend, anti-flicker).
 install.sh          Installer, autostart manager, and uninstaller.
+README.md           This file.
 TROUBLESHOOTING.md  Recovery steps and environment notes.
 ```
 
-## Safety Notes
+## Safety notes
 
-The app avoids `sudo` at runtime. Root is only needed for the installer because it writes `/usr/local/bin/kali-glass` and `/usr/share/applications/kali-glass.desktop`.
+The app avoids `sudo` at runtime.  Root is only needed for the installer because it writes `/usr/local/bin/kali-glass` and `/usr/share/applications/kali-glass.desktop`.
 
-The Python command runner executes argument lists without `shell=True`, reports non-zero exits correctly, and uses timeouts for synchronous utility calls. The app does not force `DISPLAY=:0`; start it from the active graphical session or set `DISPLAY` yourself when appropriate.
+The Python command runner executes argument lists without `shell=True`, reports non-zero exits to the log, and uses timeouts for synchronous utility calls.  The app does not force `DISPLAY=:0`; start it from the active graphical session or set `DISPLAY` yourself when appropriate.
+
+## Changelog
+
+### v2.1 (current)
+- **xrandr-only backend** — removed redshift/xrandr conflicts that caused flickering.
+- **Anti-flicker**: 300 ms debounce + "latest wins" — never kills a running process mid-command.
+- **Brightness fix**: 100 % = xrandr 1.0, 50 % = 0.5, 1 % = 0.01.
+- **Contrast fix**: neutral value 50 produces no change; moving above/below 50 visibly shifts contrast.
+- **Colour temperature** via pure xrandr gamma offsets (no redshift dependency for temp control).
+- **Wayland**: clear warning banner + silent skip of display commands.
+- **Diagnostics**: startup log + "Test Backend" tray menu action.
+- **Display targeting**: proper "All Displays" vs single-output logic.
+- **Quit**: resets all outputs to xrandr 1.0/neutral before exiting.
+
+### v2.0
+- Initial public release.
 
 ## License
 

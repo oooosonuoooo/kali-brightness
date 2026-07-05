@@ -1466,7 +1466,7 @@ class DisplayEngine(QWidget):
             self._last_schedule_state = is_night
             if is_night:
                 log.info("Schedule → night mode")
-                self.ui.sl_temp.set_value(NIGHT_TEMP)
+                self.ui.sl_temp.set_value(NIGHT_TEMP_DEF)
                 self.ui.sl_bright.set_value(70)
                 self.ui.set_night_status(True)
             else:

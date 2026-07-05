@@ -1,3 +1,4 @@
+import datetime
 import os
 import tempfile
 import unittest
@@ -238,6 +239,58 @@ class BackendDispatchTests(unittest.TestCase):
         self.assertEqual(save_calls, [True])
         self.assertTrue(fake_app.quit_called)
         run_cmd.assert_not_called()
+
+
+class ScheduleTests(unittest.TestCase):
+    def test_auto_schedule_applies_configured_night_temperature(self):
+        class FakeCheck:
+            def isChecked(self):
+                return True
+
+        class FakeTimeEdit:
+            def __init__(self, hour, minute):
+                self._time = kg.QTime(hour, minute)
+
+            def time(self):
+                return self._time
+
+        class FakeSlider:
+            def __init__(self):
+                self.values = []
+
+            def set_value(self, value):
+                self.values.append(value)
+
+        class FakeUi:
+            def __init__(self):
+                self.check_auto = FakeCheck()
+                self.time_on = FakeTimeEdit(17, 0)
+                self.time_off = FakeTimeEdit(6, 0)
+                self.sl_temp = FakeSlider()
+                self.sl_bright = FakeSlider()
+                self.night_status = []
+
+            def set_night_status(self, active):
+                self.night_status.append(active)
+
+        class FixedDatetime(datetime.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 1, 1, 18, 0, tzinfo=tz)
+
+        engine = kg.DisplayEngine.__new__(kg.DisplayEngine)
+        engine.ui = FakeUi()
+        engine._last_schedule_state = None
+        apply_calls = []
+        engine.apply_settings = lambda: apply_calls.append(True)
+
+        with mock.patch.object(kg.datetime, "datetime", FixedDatetime):
+            kg.DisplayEngine._check_auto_schedule(engine, force=True)
+
+        self.assertEqual(engine.ui.sl_temp.values, [kg.NIGHT_TEMP_DEF])
+        self.assertEqual(engine.ui.sl_bright.values, [70])
+        self.assertEqual(engine.ui.night_status, [True])
+        self.assertEqual(apply_calls, [True])
 
 
 if __name__ == "__main__":

@@ -1466,7 +1466,7 @@ class DisplayEngine(QWidget):
             self._last_schedule_state = is_night
             if is_night:
                 log.info("Schedule → night mode")
-                self.ui.sl_temp.set_value(NIGHT_TEMP_DEF)
+                self.ui.sl_temp.set_value(self.ui.preferred_night_temperature())
                 self.ui.sl_bright.set_value(70)
                 self.ui.set_night_status(True)
             else:
@@ -1475,6 +1475,13 @@ class DisplayEngine(QWidget):
                 self.ui.sl_bright.set_value(BRIGHT_DEF)
                 self.ui.set_night_status(False)
             self.apply_settings()
+
+    def apply_night_mode(self):
+        self.ui.check_auto.setChecked(False)
+        self.ui.sl_temp.set_value(self.ui.preferred_night_temperature())
+        self.ui.sl_bright.set_value(70)
+        self.ui.clear_night_status()
+        self.apply_settings()
 
     # ----------------------------------------------------------
     # Tray

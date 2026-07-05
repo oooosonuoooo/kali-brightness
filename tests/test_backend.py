@@ -273,6 +273,9 @@ class ScheduleTests(unittest.TestCase):
             def set_night_status(self, active):
                 self.night_status.append(active)
 
+            def preferred_night_temperature(self):
+                return 4100
+
         class FixedDatetime(datetime.datetime):
             @classmethod
             def now(cls, tz=None):
@@ -287,9 +290,50 @@ class ScheduleTests(unittest.TestCase):
         with mock.patch.object(kg.datetime, "datetime", FixedDatetime):
             kg.DisplayEngine._check_auto_schedule(engine, force=True)
 
-        self.assertEqual(engine.ui.sl_temp.values, [kg.NIGHT_TEMP_DEF])
+        self.assertEqual(engine.ui.sl_temp.values, [4100])
         self.assertEqual(engine.ui.sl_bright.values, [70])
         self.assertEqual(engine.ui.night_status, [True])
+        self.assertEqual(apply_calls, [True])
+
+    def test_manual_night_mode_applies_preferred_night_temperature(self):
+        class FakeCheck:
+            def __init__(self):
+                self.values = []
+
+            def setChecked(self, value):
+                self.values.append(value)
+
+        class FakeSlider:
+            def __init__(self):
+                self.values = []
+
+            def set_value(self, value):
+                self.values.append(value)
+
+        class FakeUi:
+            def __init__(self):
+                self.check_auto = FakeCheck()
+                self.sl_temp = FakeSlider()
+                self.sl_bright = FakeSlider()
+                self.cleared = False
+
+            def preferred_night_temperature(self):
+                return 4100
+
+            def clear_night_status(self):
+                self.cleared = True
+
+        engine = kg.DisplayEngine.__new__(kg.DisplayEngine)
+        engine.ui = FakeUi()
+        apply_calls = []
+        engine.apply_settings = lambda: apply_calls.append(True)
+
+        kg.DisplayEngine.apply_night_mode(engine)
+
+        self.assertEqual(engine.ui.check_auto.values, [False])
+        self.assertEqual(engine.ui.sl_temp.values, [4100])
+        self.assertEqual(engine.ui.sl_bright.values, [70])
+        self.assertTrue(engine.ui.cleared)
         self.assertEqual(apply_calls, [True])
 
 

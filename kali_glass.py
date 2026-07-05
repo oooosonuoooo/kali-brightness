@@ -73,7 +73,7 @@ DEBOUNCE_MS    = 300    # slider debounce delay (ms)
 SCHEDULE_MS    = 30000  # schedule check interval
 CMD_TIMEOUT    = 5      # subprocess timeout seconds
 STARTUP_APPLY_DELAYS_MS = (500, 3000, 8000)
-NIGHT_TEMP     = 3200
+NIGHT_TEMP_DEF = 3200
 DAY_TEMP       = 6500
 
 # xrandr gamma clamping — safe range
@@ -642,7 +642,7 @@ class NeonPopup(QWidget):
         inner.setContentsMargins(18, 14, 18, 14)
         inner.setSpacing(5)
         self._build_ui(inner)
-        self.resize(340, 750)
+        self.resize(340, 790)
 
     def _connect_slider(self, slider):
         slider.changed.connect(self._engine.schedule_update)
@@ -752,6 +752,15 @@ class NeonPopup(QWidget):
         self._connect_slider(self.sl_temp)
         L.addWidget(self.sl_temp)
 
+        self.sl_night_temp = NeonSlider(
+            "Night Temperature", TEMP_MIN, TEMP_MAX, NIGHT_TEMP_DEF, "#ff7744", "K",
+            "Preferred warm color used by Night Mode and Auto Schedule"
+        )
+        self.sl_night_temp.slider.setInvertedAppearance(True)
+        self.sl_night_temp.changed.connect(self._engine.save_settings)
+        self.sl_night_temp.released.connect(self._engine.save_settings)
+        L.addWidget(self.sl_night_temp)
+
         sr = QHBoxLayout()
         self.check_auto = QCheckBox("Auto Schedule")
         self.check_auto.setToolTip("Auto-switch night mode by time")
@@ -839,7 +848,7 @@ class NeonPopup(QWidget):
 
         self.btn_night = QPushButton("🌙  Night Mode")
         self.btn_night.setObjectName("NightBtn")
-        self.btn_night.setToolTip(f"Apply night preset ({NIGHT_TEMP}K warm)")
+        self.btn_night.setToolTip("Apply your preferred night temperature preset")
         self.btn_night.clicked.connect(self._set_night_mode)
         br.addWidget(self.btn_night)
         L.addLayout(br)
@@ -887,13 +896,14 @@ class NeonPopup(QWidget):
         self._engine.reset_display()
 
     def _set_night_mode(self):
-        self.sl_temp.set_value(NIGHT_TEMP)
-        self.sl_bright.set_value(70)
-        self._engine.apply_settings()
+        self._engine.apply_night_mode()
 
     def current_display(self):
         txt = self.combo.currentText()
         return None if (not txt or "All Displays" in txt) else txt
+
+    def preferred_night_temperature(self):
+        return clamp(self.sl_night_temp.value(), TEMP_MIN, TEMP_MAX)
 
     def set_night_status(self, is_night):
         if is_night:

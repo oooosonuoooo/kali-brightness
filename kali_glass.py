@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ============================================================
-# KALI GLASS CONTROLLER v2.4
+# KALI GLASS CONTROLLER v2.5
 # A display control center for Kali Linux (X11)
 # License: MIT
 #
@@ -51,7 +51,7 @@ from PyQt5.QtNetwork import QLocalServer, QLocalSocket
 # CONSTANTS
 # ============================================================
 APP_NAME        = "Kali Glass"
-APP_VERSION     = "2.4"
+APP_VERSION     = "2.5"
 LOCK_NAME       = "kali-glass-single-instance-lock"
 CONFIG_FILE     = os.path.expanduser(
     os.environ.get("KALI_GLASS_CONFIG", "~/.config/kali_glass/config.json")
@@ -681,10 +681,10 @@ class NeonPopup(QWidget):
         )
         ver = QLabel(f"v{APP_VERSION}")
         ver.setStyleSheet("color:#333;font-size:8px;background:transparent;")
-        cb = QPushButton("×")
+        cb = QPushButton("−")
         cb.setObjectName("CloseBtn")
-        cb.setToolTip("Hide to tray (app keeps running)")
-        cb.clicked.connect(self.hide)
+        cb.setToolTip("Minimize to taskbar (app keeps running)")
+        cb.clicked.connect(self.showMinimized)
         hdr.addWidget(dot)
         hdr.addWidget(ttl)
         hdr.addStretch()
@@ -946,6 +946,10 @@ class NeonPopup(QWidget):
 
     def mouseReleaseEvent(self, event):
         self._drag_pos = None
+
+    def closeEvent(self, event):
+        event.ignore()
+        self.showMinimized()
 
     def show_near_mouse(self):
         cursor = QCursor.pos()
@@ -1559,7 +1563,7 @@ class DisplayEngine(QWidget):
 
         self.tray = QSystemTrayIcon(self)
         self.tray.setIcon(icon)
-        self.tray.setToolTip(f"{APP_NAME} — Click to open | Right-click for menu")
+        self.tray.setToolTip(f"{APP_NAME} — Click to minimize or restore | Right-click for menu")
         self.tray.activated.connect(self._on_tray_activated)
 
         menu = QMenu()
@@ -1591,8 +1595,8 @@ class DisplayEngine(QWidget):
 
     def _on_tray_activated(self, reason):
         if reason == QSystemTrayIcon.Trigger:
-            if self.ui.isVisible():
-                self.ui.hide()
+            if self.ui.isVisible() and not self.ui.isMinimized():
+                self.ui.showMinimized()
             else:
                 self.ui.show_near_mouse()
 

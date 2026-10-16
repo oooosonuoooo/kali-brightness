@@ -51,7 +51,7 @@ from PyQt5.QtNetwork import QLocalServer, QLocalSocket
 # CONSTANTS
 # ============================================================
 APP_NAME        = "Kali Glass"
-APP_VERSION     = "2.5"
+APP_VERSION     = "2.6"
 LOCK_NAME       = "kali-glass-single-instance-lock"
 CONFIG_FILE     = os.path.expanduser(
     os.environ.get("KALI_GLASS_CONFIG", "~/.config/kali_glass/config.json")

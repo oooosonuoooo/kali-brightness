@@ -21,6 +21,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_FILE="$SCRIPT_DIR/kali_glass.py"
 INSTALL_PATH="/usr/local/bin/$APP_NAME"
 DESKTOP_PATH="/usr/share/applications/$APP_NAME.desktop"
+ICON_SOURCE="$SCRIPT_DIR/kali-glass.svg"
+ICON_PATH="/usr/share/icons/hicolor/scalable/apps/$APP_NAME.svg"
 
 INSTALL_DEPS=1
 DRY_RUN=0
@@ -90,6 +92,7 @@ require_root() {
 
 require_source() {
     [ -f "$SOURCE_FILE" ] || die "kali_glass.py not found at: $SOURCE_FILE"
+    [ -f "$ICON_SOURCE" ] || die "kali-glass.svg not found at: $ICON_SOURCE"
 }
 
 resolve_target_user() {
@@ -101,6 +104,7 @@ resolve_target_user() {
     fi
     USER_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
     TARGET_GROUP="$(id -gn "$TARGET_USER")"
+    USER_DESKTOP_PATH="$USER_HOME/.local/share/applications/$APP_NAME.desktop"
     AUTOSTART_DIR="$USER_HOME/.config/autostart"
     AUTOSTART_PATH="$AUTOSTART_DIR/$APP_NAME.desktop"
 }
@@ -151,6 +155,12 @@ install_app() {
     ok "Application installed."
 }
 
+install_icon() {
+    info "Installing Kali Glass icon..."
+    run install -D -m 0644 "$ICON_SOURCE" "$ICON_PATH"
+    ok "Icon installed: $ICON_PATH"
+}
+
 write_desktop_entry() {
     info "Writing desktop launcher..."
     if [ "$DRY_RUN" -eq 1 ]; then
@@ -166,15 +176,60 @@ Name=Kali Glass Controller
 GenericName=Display Controller
 Comment=Display brightness, gamma, and night-mode controller for X11
 Exec=$INSTALL_PATH
-Icon=preferences-desktop-display
+Icon=$ICON_PATH
 Terminal=false
 Type=Application
+StartupWMClass=$APP_NAME
 Categories=Utility;Settings;HardwareSettings;
 Keywords=brightness;gamma;night;display;monitor;xrandr;
 StartupNotify=false
 EOF
     chmod 644 "$DESKTOP_PATH"
     ok "Desktop launcher: $DESKTOP_PATH"
+}
+
+refresh_user_desktop_entry() {
+    if [ ! -f "$USER_DESKTOP_PATH" ]; then
+        return 0
+    fi
+
+    info "Refreshing the existing launcher for user: $TARGET_USER"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf "DRY-RUN: set Icon=%s in %s\n" "$ICON_PATH" "$USER_DESKTOP_PATH"
+        return
+    fi
+
+    local temp_entry
+    temp_entry="$(mktemp)"
+    python3 - "$USER_DESKTOP_PATH" "$temp_entry" "$ICON_PATH" "$APP_NAME" <<'PY'
+from pathlib import Path
+import sys
+
+source, destination, icon, wm_class = sys.argv[1:]
+lines = Path(source).read_text().splitlines()
+updated = []
+in_desktop_entry = False
+found_desktop_entry = False
+
+for line in lines:
+    if line == "[Desktop Entry]":
+        in_desktop_entry = True
+        found_desktop_entry = True
+        updated.extend((line, f"Icon={icon}", f"StartupWMClass={wm_class}"))
+        continue
+    if line.startswith("[") and line.endswith("]"):
+        in_desktop_entry = False
+    if in_desktop_entry and (line.startswith("Icon=") or line.startswith("StartupWMClass=")):
+        continue
+    updated.append(line)
+
+if not found_desktop_entry:
+    raise SystemExit("User launcher has no [Desktop Entry] section")
+Path(destination).write_text("\n".join(updated) + "\n")
+PY
+    install -o "$TARGET_USER" -g "$TARGET_GROUP" -m 0644 "$temp_entry" "$USER_DESKTOP_PATH"
+    rm -f "$temp_entry"
+    ok "User launcher icon updated: $USER_DESKTOP_PATH"
 }
 
 write_autostart_entry() {
@@ -219,6 +274,23 @@ verify_installation() {
     local fail=0
     [ -x "$INSTALL_PATH" ] && ok "Binary: $INSTALL_PATH" || { error "Binary missing or not executable"; fail=1; }
     [ -f "$DESKTOP_PATH" ] && ok "Desktop entry: $DESKTOP_PATH" || { error "Desktop entry missing"; fail=1; }
+    [ -f "$ICON_PATH" ] && ok "Icon: $ICON_PATH" || { error "Kali Glass icon missing"; fail=1; }
+    if [ -f "$DESKTOP_PATH" ] && grep -Fqx "Icon=$ICON_PATH" "$DESKTOP_PATH" \
+        && grep -Fqx "StartupWMClass=$APP_NAME" "$DESKTOP_PATH"; then
+        ok "System launcher uses the Kali Glass icon and window class."
+    else
+        error "System launcher icon is not configured."
+        fail=1
+    fi
+    if [ -f "$USER_DESKTOP_PATH" ]; then
+        if grep -Fqx "Icon=$ICON_PATH" "$USER_DESKTOP_PATH" \
+            && grep -Fqx "StartupWMClass=$APP_NAME" "$USER_DESKTOP_PATH"; then
+            ok "User launcher uses the Kali Glass icon and window class."
+        else
+            error "User launcher icon/window class is not configured."
+            fail=1
+        fi
+    fi
     command -v python3 >/dev/null 2>&1 && ok "python3: $(python3 --version)" || { error "python3 not found"; fail=1; }
     python3 -c "from PyQt5.QtWidgets import QApplication" 2>/dev/null && ok "PyQt5 import: OK" || { error "PyQt5 import failed"; fail=1; }
     command -v redshift >/dev/null 2>&1 && ok "redshift: $(redshift -V 2>&1 | head -1) (optional external neutralize only)" || ok "redshift: not installed (OK)"
@@ -250,7 +322,7 @@ launch_app() {
 
 uninstall_app() {
     info "Removing installed files..."
-    run rm -f "$INSTALL_PATH" "$DESKTOP_PATH"
+    run rm -f "$INSTALL_PATH" "$DESKTOP_PATH" "$ICON_PATH"
     run rm -f "$AUTOSTART_PATH"
     if [ "$PURGE_CONFIG" -eq 1 ]; then
         run rm -rf "$USER_HOME/.config/kali_glass"
@@ -271,7 +343,9 @@ fi
 require_source
 install_dependencies
 install_app
+install_icon
 write_desktop_entry
+refresh_user_desktop_entry
 
 case "$AUTOSTART_MODE" in
     enable) write_autostart_entry ;;

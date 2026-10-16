@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ============================================================
-# KALI GLASS CONTROLLER v2.2
+# KALI GLASS CONTROLLER v2.3
 # A display control center for Kali Linux (X11)
 # License: MIT
 #
@@ -51,7 +51,7 @@ from PyQt5.QtNetwork import QLocalServer, QLocalSocket
 # CONSTANTS
 # ============================================================
 APP_NAME        = "Kali Glass"
-APP_VERSION     = "2.2"
+APP_VERSION     = "2.3"
 LOCK_NAME       = "kali-glass-single-instance-lock"
 CONFIG_FILE     = os.path.expanduser(
     os.environ.get("KALI_GLASS_CONFIG", "~/.config/kali_glass/config.json")
@@ -1614,6 +1614,10 @@ def main():
         )
         sys.exit(1)
 
+    start_in_background = "--background" in sys.argv[1:]
+    if start_in_background:
+        sys.argv.remove("--background")
+
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
@@ -1623,13 +1627,37 @@ def main():
     sock = QLocalSocket()
     sock.connectToServer(LOCK_NAME)
     if sock.waitForConnected(500):
-        print(f"{APP_NAME} is already running.")
+        sock.write(b"show")
+        sock.waitForBytesWritten(500)
+        sock.disconnectFromServer()
+        print(f"{APP_NAME} is already running; opening its panel.")
         sys.exit(0)
 
     srv = QLocalServer()
     srv.removeServer(LOCK_NAME)
     if not srv.listen(LOCK_NAME):
         log.warning("Could not acquire singleton lock — continuing anyway")
+
+    def activate_existing_instance():
+        while srv.hasPendingConnections():
+            client = srv.nextPendingConnection()
+            if client is None:
+                continue
+
+            def handle_activation(client=client):
+                request = bytes(client.readAll()).strip().lower()
+                if request in (b"", b"show", b"activate"):
+                    engine = getattr(app, "kali_glass_engine", None)
+                    if engine is not None:
+                        QTimer.singleShot(0, engine.ui.show_near_mouse)
+                client.disconnectFromServer()
+                client.deleteLater()
+
+            client.readyRead.connect(handle_activation)
+            if client.bytesAvailable():
+                handle_activation()
+
+    srv.newConnection.connect(activate_existing_instance)
 
     # Wait for tray with timeout
     deadline = time.time() + 10
@@ -1641,6 +1669,8 @@ def main():
         log.warning("System tray unavailable after 10s — continuing without it")
 
     app.kali_glass_engine = DisplayEngine()
+    if not start_in_background:
+        QTimer.singleShot(0, app.kali_glass_engine.ui.show_near_mouse)
     ret = app.exec_()
     srv.close()
     sys.exit(ret)

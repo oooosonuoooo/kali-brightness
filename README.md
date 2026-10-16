@@ -12,8 +12,8 @@ Kali Glass Controller is a PyQt5 tray app for X11 display tuning on Kali Linux a
 | Contrast | Contrast slider 50 = neutral (no change), > 50 = higher contrast, < 50 = lower contrast. |
 | Gamma | Gamma slider 100 = neutral (1.0), 50 = 0.5, 200 = 2.0. Applied per channel via `xrandr --gamma`. |
 | RGB channels | Separate red, green, and blue gamma multipliers, clamped to safe xrandr values. |
-| Colour temperature | Warm/cool shift (1 000 K – 6 500 K) implemented as RGB gamma offsets — no redshift dependency. |
-| Night mode | One-click warm preset (3 200 K, 70 % brightness). |
+| Colour temperature | Warm/cool shift (1 000 K – 6 500 K) mapped from a black-body RGB approximation into xrandr gamma factors — no redshift dependency. |
+| Night mode | One-click warm preset (3 200 K, 70 % brightness); the preferred night temperature is saved and updates live while night mode is active. |
 | Auto schedule | Applies day/night presets at user-configured times. |
 | Multi-monitor | Detects X11 outputs through `xrandr --query`; targets all displays or a single output. |
 | Anti-flicker | 300 ms debounce + "latest wins" logic: never kills a running command; applies only the newest pending settings after the current command completes. |
@@ -190,7 +190,11 @@ The Python command runner executes argument lists without `shell=True`, reports 
 
 ## Changelog
 
-### v2.1 (current)
+### v2.2 (current)
+- **Color temperature**: black-body RGB mapping gives the full 1,000–6,500 K range a visible xrandr gamma shift.
+- **Night temperature**: the preferred value is saved across restarts and applies live when Night Mode or the night schedule is active.
+
+### v2.1
 - **xrandr-only backend** — removed redshift/xrandr conflicts that caused flickering.
 - **Anti-flicker**: 300 ms debounce + "latest wins" — never kills a running process mid-command.
 - **Brightness fix**: 100 % = xrandr 1.0, 50 % = 0.5, 5 % = 0.05.

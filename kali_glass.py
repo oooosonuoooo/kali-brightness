@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 # ============================================================
-# KALI GLASS CONTROLLER v2.1
+# KALI GLASS CONTROLLER v2.2
 # A display control center for Kali Linux (X11)
 # License: MIT
+#
+# FIXES in v2.2:
+#   - Black-body temperature mapping makes warm settings visibly effective
+#   - Preferred night temperature persists and updates live in night mode
 #
 # FIXES in v2.1:
 #   - xrandr-only backend path (no more redshift/xrandr conflicts)
@@ -47,7 +51,7 @@ from PyQt5.QtNetwork import QLocalServer, QLocalSocket
 # CONSTANTS
 # ============================================================
 APP_NAME        = "Kali Glass"
-APP_VERSION     = "2.1"
+APP_VERSION     = "2.2"
 LOCK_NAME       = "kali-glass-single-instance-lock"
 CONFIG_FILE     = os.path.expanduser(
     os.environ.get("KALI_GLASS_CONFIG", "~/.config/kali_glass/config.json")
@@ -353,20 +357,37 @@ def config_time(hour, minute, default_hour, default_minute):
 
 def temp_to_gamma(kelvin):
     """
-    Convert color temperature (K) to approximate RGB gamma offsets for xrandr.
-    Returns (r_factor, g_factor, b_factor) all near 1.0 at 6500K,
-    shifting warm (red↑, blue↓) at lower temps.
-    This keeps color temperature inside the xrandr gamma path.
+    Convert black-body color temperature to normalized xrandr gamma factors.
+    The factors are neutral at 6500K and progressively reduce green and blue
+    at warmer settings, so the xrandr ramp produces a visible warm shift.
     """
-    k = clamp(kelvin, 1000, 6500)
-    # Linear interpolation from 6500K (neutral) to 1000K (warm orange)
-    t = (6500 - k) / 5500.0   # 0.0 at 6500K, 1.0 at 1000K
+    t = clamp(kelvin, 1000, 6500) / 100.0
 
-    r = clamp(1.0 + t * 0.0, 0.5, 1.0)           # red stays at 1.0
-    g = clamp(1.0 - t * 0.15, 0.5, 1.0)           # green drops slightly
-    b = clamp(1.0 - t * 0.55, 0.1, 1.0)           # blue drops more
+    # Tanner Helland's black-body RGB approximation, evaluated over the
+    # supported 1000–6500K range.
+    if t <= 66.0:
+        red = 255.0
+        green = 99.4708025861 * math.log(t) - 161.1195681661
+        blue = (
+            0.0 if t <= 19.0 else
+            138.5177312231 * math.log(t - 10.0) - 305.0447927307
+        )
+    else:
+        red = 329.698727446 * ((t - 60.0) ** -0.1332047592)
+        green = 288.1221695283 * ((t - 60.0) ** -0.0755148492)
+        blue = 255.0
 
-    return r, g, b
+    neutral_t = 65.0
+    neutral = (
+        329.698727446 * ((neutral_t - 60.0) ** -0.1332047592),
+        288.1221695283 * ((neutral_t - 60.0) ** -0.0755148492),
+        255.0,
+    )
+    channels = (red, green, blue)
+    return tuple(
+        clamp(max(0.0, min(255.0, value)) / reference, 0.1, 1.0)
+        for value, reference in zip(channels, neutral)
+    )
 
 
 # ============================================================
@@ -754,11 +775,12 @@ class NeonPopup(QWidget):
 
         self.sl_night_temp = NeonSlider(
             "Night Temperature", TEMP_MIN, TEMP_MAX, NIGHT_TEMP_DEF, "#ff7744", "K",
-            "Preferred warm color used by Night Mode and Auto Schedule"
+            "Preferred warm color used by Night Mode and Auto Schedule; "
+            "updates live while night mode is active"
         )
         self.sl_night_temp.slider.setInvertedAppearance(True)
-        self.sl_night_temp.changed.connect(self._engine.save_settings)
-        self.sl_night_temp.released.connect(self._engine.save_settings)
+        self.sl_night_temp.changed.connect(self._engine.on_night_temperature_changed)
+        self.sl_night_temp.released.connect(self._engine.on_night_temperature_released)
         L.addWidget(self.sl_night_temp)
 
         sr = QHBoxLayout()
@@ -985,6 +1007,7 @@ class DisplayEngine(QWidget):
         self._last_applied_info   = None
         self._apply_had_error     = False
         self._external_color_suppressed = False
+        self._manual_night_mode = False
 
         app = QApplication.instance()
         if app:
@@ -1099,6 +1122,7 @@ class DisplayEngine(QWidget):
             self.ui.sl_contrast.set_value(clamp(d.get("contrast", CONTRAST_DEF), CONTRAST_MIN, CONTRAST_MAX))
             self.ui.sl_gamma.set_value(   clamp(d.get("gamma",    GAMMA_DEF),    GAMMA_MIN,    GAMMA_MAX))
             self.ui.sl_temp.set_value(    clamp(d.get("temp",     TEMP_DEF),     TEMP_MIN,     TEMP_MAX))
+            self.ui.sl_night_temp.set_value(clamp(d.get("night_temp", NIGHT_TEMP_DEF), TEMP_MIN, TEMP_MAX))
             self.ui.sl_r.set_value(       clamp(d.get("red",      RGB_DEF),      RGB_MIN,      RGB_MAX))
             self.ui.sl_g.set_value(       clamp(d.get("green",    RGB_DEF),      RGB_MIN,      RGB_MAX))
             self.ui.sl_b.set_value(       clamp(d.get("blue",     RGB_DEF),      RGB_MIN,      RGB_MAX))
@@ -1124,6 +1148,7 @@ class DisplayEngine(QWidget):
                 "contrast":      self.ui.sl_contrast.value(),
                 "gamma":         self.ui.sl_gamma.value(),
                 "temp":          self.ui.sl_temp.value(),
+                "night_temp":    self.ui.sl_night_temp.value(),
                 "red":           self.ui.sl_r.value(),
                 "green":         self.ui.sl_g.value(),
                 "blue":          self.ui.sl_b.value(),
@@ -1148,6 +1173,22 @@ class DisplayEngine(QWidget):
     def schedule_update(self):
         """Called on every slider valueChanged — restarts debounce timer."""
         self._debounce.start()
+
+    def _night_mode_active(self):
+        return self._manual_night_mode or (
+            self.ui.check_auto.isChecked() and self._last_schedule_state is True
+        )
+
+    def on_night_temperature_changed(self):
+        """Persist the preset and apply it immediately while night mode is active."""
+        if self._night_mode_active():
+            self.ui.sl_temp.set_value(self.ui.preferred_night_temperature())
+            self.schedule_update()
+        self.save_settings()
+
+    def on_night_temperature_released(self):
+        if self._night_mode_active():
+            self.flush_update()
 
     def flush_update(self):
         """Apply immediately when a slider is released."""
@@ -1178,6 +1219,7 @@ class DisplayEngine(QWidget):
 
     def reset_display(self):
         """Reset selected output(s) to xrandr brightness 1.0 and gamma 1:1:1."""
+        self._manual_night_mode = False
         self.save_settings()
         reason = display_unavailable_reason(xrandr_path=self.xrandr_path)
         if reason:
@@ -1441,8 +1483,12 @@ class DisplayEngine(QWidget):
 
     def on_schedule_toggled(self, checked):
         if checked:
+            self._manual_night_mode = False
             self._check_auto_schedule(force=True)
         else:
+            self._manual_night_mode = (
+                self._manual_night_mode or self._last_schedule_state is True
+            )
             self._last_schedule_state = None
             self.ui.clear_night_status()
             self.apply_settings()
@@ -1464,6 +1510,7 @@ class DisplayEngine(QWidget):
 
         if force or self._last_schedule_state != is_night:
             self._last_schedule_state = is_night
+            self._manual_night_mode = False
             if is_night:
                 log.info("Schedule → night mode")
                 self.ui.sl_temp.set_value(self.ui.preferred_night_temperature())
@@ -1477,6 +1524,7 @@ class DisplayEngine(QWidget):
             self.apply_settings()
 
     def apply_night_mode(self):
+        self._manual_night_mode = True
         self.ui.check_auto.setChecked(False)
         self.ui.sl_temp.set_value(self.ui.preferred_night_temperature())
         self.ui.sl_bright.set_value(70)

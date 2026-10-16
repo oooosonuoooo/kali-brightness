@@ -144,7 +144,7 @@ xrandr --output OUTPUT --gamma 1.0:1.0:1.0
 
 ## Night mode (warm colour) does nothing
 
-The colour temperature slider now uses pure xrandr gamma offsets — no redshift is needed.  Verify:
+The colour temperature slider uses xrandr gamma factors, with a black-body mapping across 1,000–6,500 K. The Night Temperature preset is saved; changing it while Night Mode or a scheduled night is active updates the display immediately. When night mode is off, press **Night Mode** to apply the saved preset. Verify the backend:
 
 ```bash
 # Simulate warm (3200 K) manually

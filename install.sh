@@ -23,6 +23,7 @@ INSTALL_PATH="/usr/local/bin/$APP_NAME"
 DESKTOP_PATH="/usr/share/applications/$APP_NAME.desktop"
 ICON_SOURCE="$SCRIPT_DIR/kali-glass.svg"
 ICON_PATH="/usr/share/icons/hicolor/scalable/apps/$APP_NAME.svg"
+WINDOW_CLASS="Kali Glass"
 
 INSTALL_DEPS=1
 DRY_RUN=0
@@ -179,7 +180,7 @@ Exec=$INSTALL_PATH
 Icon=$ICON_PATH
 Terminal=false
 Type=Application
-StartupWMClass=$APP_NAME
+StartupWMClass=$WINDOW_CLASS
 Categories=Utility;Settings;HardwareSettings;
 Keywords=brightness;gamma;night;display;monitor;xrandr;
 StartupNotify=false
@@ -201,7 +202,7 @@ refresh_user_desktop_entry() {
 
     local temp_entry
     temp_entry="$(mktemp)"
-    python3 - "$USER_DESKTOP_PATH" "$temp_entry" "$ICON_PATH" "$APP_NAME" <<'PY'
+    python3 - "$USER_DESKTOP_PATH" "$temp_entry" "$ICON_PATH" "$WINDOW_CLASS" <<'PY'
 from pathlib import Path
 import sys
 
@@ -276,7 +277,7 @@ verify_installation() {
     [ -f "$DESKTOP_PATH" ] && ok "Desktop entry: $DESKTOP_PATH" || { error "Desktop entry missing"; fail=1; }
     [ -f "$ICON_PATH" ] && ok "Icon: $ICON_PATH" || { error "Kali Glass icon missing"; fail=1; }
     if [ -f "$DESKTOP_PATH" ] && grep -Fqx "Icon=$ICON_PATH" "$DESKTOP_PATH" \
-        && grep -Fqx "StartupWMClass=$APP_NAME" "$DESKTOP_PATH"; then
+        && grep -Fqx "StartupWMClass=$WINDOW_CLASS" "$DESKTOP_PATH"; then
         ok "System launcher uses the Kali Glass icon and window class."
     else
         error "System launcher icon is not configured."
@@ -284,7 +285,7 @@ verify_installation() {
     fi
     if [ -f "$USER_DESKTOP_PATH" ]; then
         if grep -Fqx "Icon=$ICON_PATH" "$USER_DESKTOP_PATH" \
-            && grep -Fqx "StartupWMClass=$APP_NAME" "$USER_DESKTOP_PATH"; then
+            && grep -Fqx "StartupWMClass=$WINDOW_CLASS" "$USER_DESKTOP_PATH"; then
             ok "User launcher uses the Kali Glass icon and window class."
         else
             error "User launcher icon/window class is not configured."

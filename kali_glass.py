@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ============================================================
-# KALI GLASS CONTROLLER v2.3
+# KALI GLASS CONTROLLER v2.4
 # A display control center for Kali Linux (X11)
 # License: MIT
 #
@@ -51,7 +51,7 @@ from PyQt5.QtNetwork import QLocalServer, QLocalSocket
 # CONSTANTS
 # ============================================================
 APP_NAME        = "Kali Glass"
-APP_VERSION     = "2.3"
+APP_VERSION     = "2.4"
 LOCK_NAME       = "kali-glass-single-instance-lock"
 CONFIG_FILE     = os.path.expanduser(
     os.environ.get("KALI_GLASS_CONFIG", "~/.config/kali_glass/config.json")
@@ -636,7 +636,7 @@ class NeonPopup(QWidget):
         self._drag_pos = None
 
         self.setWindowFlags(
-            Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+            Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setWindowTitle(APP_NAME)
@@ -1553,8 +1553,12 @@ class DisplayEngine(QWidget):
         p.drawEllipse(28, 28, 8, 8)
         p.end()
 
+        icon = QIcon(pix)
+        QApplication.instance().setWindowIcon(icon)
+        self.ui.setWindowIcon(icon)
+
         self.tray = QSystemTrayIcon(self)
-        self.tray.setIcon(QIcon(pix))
+        self.tray.setIcon(icon)
         self.tray.setToolTip(f"{APP_NAME} — Click to open | Right-click for menu")
         self.tray.activated.connect(self._on_tray_activated)
 

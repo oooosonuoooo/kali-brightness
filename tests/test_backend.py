@@ -37,6 +37,9 @@ def gamma_values(gamma_str):
 
 
 class BackendMathTests(unittest.TestCase):
+    def test_day_temperature_is_neutral(self):
+        self.assertEqual(kg.temp_to_gamma(6500), (1.0, 1.0, 1.0))
+
     def test_brightness_percent_maps_directly_to_xrandr_value(self):
         for percent, expected in ((100, 1.0), (50, 0.5), (10, 0.1), (1, 0.05)):
             brightness, gamma = kg.DisplayEngine._compute_gamma(

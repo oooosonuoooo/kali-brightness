@@ -377,11 +377,14 @@ def temp_to_gamma(kelvin):
         green = 288.1221695283 * ((t - 60.0) ** -0.0755148492)
         blue = 255.0
 
+    # Normalize against the same approximation branch used above. At 6500 K
+    # the <= 66 branch caps red at 255; using the other branch's uncapped
+    # formula here made the advertised neutral setting tint every profile.
     neutral_t = 65.0
     neutral = (
-        329.698727446 * ((neutral_t - 60.0) ** -0.1332047592),
-        288.1221695283 * ((neutral_t - 60.0) ** -0.0755148492),
         255.0,
+        99.4708025861 * math.log(neutral_t) - 161.1195681661,
+        138.5177312231 * math.log(neutral_t - 10.0) - 305.0447927307,
     )
     channels = (red, green, blue)
     return tuple(
